@@ -12,12 +12,13 @@ import (
 )
 
 type WebServer struct {
-	config *Config
-	state  *State
+	config  *Config
+	state   *State
+	monitor *Monitor
 }
 
-func NewWebServer(config *Config, state *State) *WebServer {
-	return &WebServer{config: config, state: state}
+func NewWebServer(config *Config, state *State, monitor *Monitor) *WebServer {
+	return &WebServer{config: config, state: state, monitor: monitor}
 }
 
 func (ws *WebServer) Handler() http.Handler {
@@ -170,20 +171,25 @@ func (ws *WebServer) handleDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	found := false
-	for _, dev := range ws.config.Devices {
-		if dev.IP == ip {
-			found = true
+	var foundDev *Device
+	for i := range ws.config.Devices {
+		if ws.config.Devices[i].IP == ip {
+			foundDev = &ws.config.Devices[i]
 			break
 		}
 	}
-	if !found {
+	if foundDev == nil {
 		http.Error(w, "Unknown device", http.StatusBadRequest)
 		return
 	}
 
 	ws.state.DisableFor(ip, 1*time.Hour)
 	log.Printf("Blocking disabled for 1 hour for device %s", ip)
+
+	// Immediately unblock router-blocked devices
+	if foundDev.BlockMethod == "router" && ws.state.IsRouterBlocked(ip) && ws.monitor != nil {
+		ws.monitor.RouterUnblock(foundDev)
+	}
 
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }

@@ -11,17 +11,28 @@ import (
 
 type Config struct {
 	UIPassword string   `toml:"ui_password"`
+	Router     *Router  `toml:"router"`
 	Devices    []Device `toml:"devices"`
 }
 
+type Router struct {
+	IP          string `toml:"ip"`
+	SSHUser     string `toml:"ssh_user"`
+	SSHPassword string `toml:"ssh_password"`
+	SSHKey      string `toml:"ssh_key"`
+}
+
 type Device struct {
-	Name        string   `toml:"name"`
-	IP          string   `toml:"ip"`
-	SSHUser     string   `toml:"ssh_user"`
-	SSHPassword string   `toml:"ssh_password"`
-	SSHKey      string   `toml:"ssh_key"` // path to private key file
-	OS          string   `toml:"os"`
-	Schedule    Schedule `toml:"schedule"`
+	Name         string   `toml:"name"`
+	IP           string   `toml:"ip"`
+	SSHUser      string   `toml:"ssh_user"`
+	SSHPassword  string   `toml:"ssh_password"`
+	SSHKey       string   `toml:"ssh_key"` // path to private key file
+	OS           string   `toml:"os"`
+	MAC          string   `toml:"mac"`
+	BlockMethod  string   `toml:"block_method"`  // "ssh_shutdown" (default) or "router"
+	DetectMethod string   `toml:"detect_method"` // "ping" (default) or "router_conntrack"
+	Schedule     Schedule `toml:"schedule"`
 }
 
 type AllowedHours struct {
@@ -122,6 +133,32 @@ func LoadConfig(path string) (*Config, error) {
 		if d.OS != "linux" && d.OS != "windows" {
 			return nil, fmt.Errorf("device %q: unsupported OS %q (use linux or windows)", d.Name, d.OS)
 		}
+
+		if d.BlockMethod == "" {
+			d.BlockMethod = "ssh_shutdown"
+		}
+		if d.BlockMethod != "ssh_shutdown" && d.BlockMethod != "router" {
+			return nil, fmt.Errorf("device %q: unsupported block_method %q (use ssh_shutdown or router)", d.Name, d.BlockMethod)
+		}
+		if d.BlockMethod == "router" {
+			if d.MAC == "" {
+				return nil, fmt.Errorf("device %q: mac is required when block_method is \"router\"", d.Name)
+			}
+			if cfg.Router == nil {
+				return nil, fmt.Errorf("device %q: [router] section must be configured when block_method is \"router\"", d.Name)
+			}
+		}
+
+		if d.DetectMethod == "" {
+			d.DetectMethod = "ping"
+		}
+		if d.DetectMethod != "ping" && d.DetectMethod != "router_conntrack" {
+			return nil, fmt.Errorf("device %q: unsupported detect_method %q (use ping or router_conntrack)", d.Name, d.DetectMethod)
+		}
+		if d.DetectMethod == "router_conntrack" && cfg.Router == nil {
+			return nil, fmt.Errorf("device %q: [router] section must be configured when detect_method is \"router_conntrack\"", d.Name)
+		}
+
 		cfg.Devices[i] = d
 	}
 

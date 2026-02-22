@@ -8,14 +8,24 @@
    ^   ^
 ```
 
-A lightweight Go application that monitors devices on your network via ping, tracks daily usage time, and shuts them down via SSH when time limits are exceeded or they're outside the allowed schedule. A web UI allows temporarily disabling the blockage.
+## The Problem
+
+Existing parental control tools work great for individual device types but none of them cover the full picture. Apple Screen Time only manages iPhones and iPads. Google Family Link handles Android devices. Router-level controls can restrict internet access but have no visibility into local usage. Desktop tools only see the computer they're installed on. If your household has a mix of PCs, phones, tablets, and smart TVs, you end up juggling multiple apps with separate limits — and kids quickly learn that when the PC is locked, the tablet still works.
+
+ParentalParrot takes a different approach: it runs on your network as a single service and enforces unified time limits across all screen devices, regardless of OS or form factor. Computers are shut down via SSH. Phones, tablets, and TVs — devices that can't be shut down remotely — are blocked at the network level by SSHing into your OpenWRT router and adding iptables firewall rules. One config file, one dashboard, one set of rules for everything.
 
 ## Features
 
 - Ping-based device monitoring (every 60 seconds)
 - Per-day time limits with flexible scheduling (all days / weekday+weekend / individual days)
 - Allowed hours window (e.g. 08:00-21:00)
-- Automatic shutdown via SSH (Linux and Windows)
+- Two blocking methods:
+  - **SSH shutdown** for computers (Linux and Windows)
+  - **Router firewall rules** for phones, tablets, and TVs via OpenWRT (iptables MAC-based blocking)
+- Two detection methods:
+  - **Ping** for devices that respond to ICMP
+  - **Router ARP table** for devices that don't (many phones/tablets drop pings)
+- Automatic unblocking when limits reset, allowed hours resume, or blocking is manually disabled
 - SSH key and password authentication
 - Web dashboard with login, usage bars, and "Disable for 1 hour" button
 - Persistent state across restarts (JSON file, auto-prunes entries older than 7 days)
@@ -42,21 +52,41 @@ Open http://localhost:8080 and log in with the password from your config.
 ```toml
 ui_password = "secret123"
 
+# Required for block_method = "router" or detect_method = "router_conntrack"
+[router]
+ip = "192.168.1.1"
+ssh_user = "root"
+ssh_key = "/home/you/.ssh/id_ed25519"
+# ssh_password = "password"  # alternative to ssh_key
+
+# A computer — shut down via SSH when limit is exceeded
 [[devices]]
 name = "Kids PC"
 ip = "192.168.1.100"
 ssh_user = "admin"
 ssh_password = "password"
-# ssh_key = "/home/you/.ssh/id_ed25519"  # alternative to password
 os = "linux"  # "linux" or "windows"
+# block_method = "ssh_shutdown"  # default
+# detect_method = "ping"         # default
 
 [devices.schedule]
-# Use one of: "all", "weekday"/"weekend", or individual day names
 all = 120  # minutes per day
 
 [devices.schedule.allowed_hours]
 start = "08:00"
 end = "21:00"
+
+# A phone — blocked at the router by MAC address
+[[devices]]
+name = "Kid's Phone"
+ip = "192.168.1.150"
+mac = "AA:BB:CC:DD:EE:FF"
+block_method = "router"
+detect_method = "router_conntrack"
+
+[devices.schedule]
+weekday = 60
+weekend = 120
 ```
 
 ### Schedule Priority

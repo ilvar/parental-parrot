@@ -77,6 +77,41 @@ func TestState_OnlineStatus(t *testing.T) {
 	}
 }
 
+func TestState_RouterBlocked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s := NewState(path)
+	ip := "10.0.0.1"
+
+	if s.IsRouterBlocked(ip) {
+		t.Error("should not be router-blocked initially")
+	}
+
+	s.SetRouterBlocked(ip, true)
+	if !s.IsRouterBlocked(ip) {
+		t.Error("should be router-blocked after SetRouterBlocked(true)")
+	}
+
+	s.SetRouterBlocked(ip, false)
+	if s.IsRouterBlocked(ip) {
+		t.Error("should not be router-blocked after SetRouterBlocked(false)")
+	}
+}
+
+func TestState_RouterBlocked_Persistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	s1 := NewState(path)
+	s1.SetRouterBlocked("10.0.0.1", true)
+
+	s2 := NewState(path)
+	if err := s2.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !s2.IsRouterBlocked("10.0.0.1") {
+		t.Error("router-blocked status should persist across load")
+	}
+}
+
 func TestState_DisableFor(t *testing.T) {
 	s := NewState(filepath.Join(t.TempDir(), "state.json"))
 	ip := "10.0.0.1"

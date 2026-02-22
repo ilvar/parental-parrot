@@ -46,7 +46,7 @@ func main() {
 	log.Println("Monitor started (checking every 60s)")
 
 	// Start web server
-	ws := NewWebServer(cfg, state)
+	ws := NewWebServer(cfg, state, monitor)
 	srv := &http.Server{
 		Addr:    *listen,
 		Handler: ws.Handler(),

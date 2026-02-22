@@ -222,6 +222,195 @@ func TestLoadConfig_FileNotFound(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_RouterConfig(t *testing.T) {
+	content := `
+ui_password = "x"
+
+[router]
+ip = "192.168.1.1"
+ssh_user = "root"
+ssh_key = "/home/user/.ssh/id_ed25519"
+
+[[devices]]
+name = "Phone"
+ip = "192.168.1.150"
+mac = "AA:BB:CC:DD:EE:FF"
+block_method = "router"
+detect_method = "router_conntrack"
+
+[devices.schedule]
+all = 120
+`
+	path := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if cfg.Router == nil {
+		t.Fatal("Router should not be nil")
+	}
+	if cfg.Router.IP != "192.168.1.1" {
+		t.Errorf("Router.IP = %q, want %q", cfg.Router.IP, "192.168.1.1")
+	}
+	if cfg.Router.SSHUser != "root" {
+		t.Errorf("Router.SSHUser = %q, want %q", cfg.Router.SSHUser, "root")
+	}
+
+	d := cfg.Devices[0]
+	if d.BlockMethod != "router" {
+		t.Errorf("BlockMethod = %q, want %q", d.BlockMethod, "router")
+	}
+	if d.MAC != "AA:BB:CC:DD:EE:FF" {
+		t.Errorf("MAC = %q, want %q", d.MAC, "AA:BB:CC:DD:EE:FF")
+	}
+	if d.DetectMethod != "router_conntrack" {
+		t.Errorf("DetectMethod = %q, want %q", d.DetectMethod, "router_conntrack")
+	}
+}
+
+func TestLoadConfig_RouterBlockMethodRequiresMAC(t *testing.T) {
+	content := `
+ui_password = "x"
+
+[router]
+ip = "192.168.1.1"
+ssh_user = "root"
+ssh_password = "pass"
+
+[[devices]]
+name = "Phone"
+ip = "192.168.1.150"
+block_method = "router"
+
+[devices.schedule]
+all = 120
+`
+	path := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for router block_method without MAC, got nil")
+	}
+}
+
+func TestLoadConfig_RouterBlockMethodRequiresRouterSection(t *testing.T) {
+	content := `
+ui_password = "x"
+
+[[devices]]
+name = "Phone"
+ip = "192.168.1.150"
+mac = "AA:BB:CC:DD:EE:FF"
+block_method = "router"
+
+[devices.schedule]
+all = 120
+`
+	path := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for router block_method without [router] section, got nil")
+	}
+}
+
+func TestLoadConfig_ConntrackRequiresRouterSection(t *testing.T) {
+	content := `
+ui_password = "x"
+
+[[devices]]
+name = "Phone"
+ip = "192.168.1.150"
+detect_method = "router_conntrack"
+
+[devices.schedule]
+all = 120
+`
+	path := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for router_conntrack detect_method without [router] section, got nil")
+	}
+}
+
+func TestLoadConfig_DefaultBlockAndDetectMethod(t *testing.T) {
+	content := `
+ui_password = "x"
+[[devices]]
+name = "D"
+ip = "1.2.3.4"
+ssh_user = "u"
+ssh_password = "p"
+
+[devices.schedule]
+all = 60
+`
+	path := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Devices[0].BlockMethod != "ssh_shutdown" {
+		t.Errorf("BlockMethod = %q, want %q (default)", cfg.Devices[0].BlockMethod, "ssh_shutdown")
+	}
+	if cfg.Devices[0].DetectMethod != "ping" {
+		t.Errorf("DetectMethod = %q, want %q (default)", cfg.Devices[0].DetectMethod, "ping")
+	}
+}
+
+func TestLoadConfig_InvalidBlockMethod(t *testing.T) {
+	content := `
+ui_password = "x"
+[[devices]]
+name = "D"
+ip = "1.2.3.4"
+ssh_user = "u"
+ssh_password = "p"
+block_method = "magic"
+
+[devices.schedule]
+all = 60
+`
+	path := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for invalid block_method, got nil")
+	}
+}
+
+func TestLoadConfig_InvalidDetectMethod(t *testing.T) {
+	content := `
+ui_password = "x"
+[[devices]]
+name = "D"
+ip = "1.2.3.4"
+ssh_user = "u"
+ssh_password = "p"
+detect_method = "magic"
+
+[devices.schedule]
+all = 60
+`
+	path := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for invalid detect_method, got nil")
+	}
+}
+
 func TestLoadConfig_SSHKey(t *testing.T) {
 	content := `
 ui_password = "x"

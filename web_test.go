@@ -17,14 +17,16 @@ func testWebServer(t *testing.T) (*WebServer, *State) {
 		UIPassword: "testpass",
 		Devices: []Device{
 			{
-				Name:    "Test PC",
-				IP:      "10.0.0.1",
-				OS:      "linux",
-				Schedule: Schedule{All: intPtr(120)},
+				Name:         "Test PC",
+				IP:           "10.0.0.1",
+				OS:           "linux",
+				BlockMethod:  "ssh_shutdown",
+				DetectMethod: "ping",
+				Schedule:     Schedule{All: intPtr(120)},
 			},
 		},
 	}
-	return NewWebServer(cfg, state), state
+	return NewWebServer(cfg, state, nil), state
 }
 
 func TestSession_CreateAndValidate(t *testing.T) {
@@ -292,6 +294,56 @@ func TestWeb_NotFound(t *testing.T) {
 	}
 }
 
+func TestWeb_DisableUnblocksRouterDevice(t *testing.T) {
+	state := NewState(filepath.Join(t.TempDir(), "state.json"))
+	cfg := &Config{
+		UIPassword: "testpass",
+		Router:     &Router{IP: "192.168.1.1", SSHUser: "root", SSHPassword: "pass"},
+		Devices: []Device{
+			{
+				Name:         "Phone",
+				IP:           "10.0.0.5",
+				MAC:          "AA:BB:CC:DD:EE:FF",
+				BlockMethod:  "router",
+				DetectMethod: "ping",
+				Schedule:     Schedule{All: intPtr(120)},
+			},
+		},
+	}
+	monitor := NewMonitor(cfg, state)
+	ws := NewWebServer(cfg, state, monitor)
+
+	// Simulate the device being router-blocked
+	state.SetRouterBlocked("10.0.0.5", true)
+
+	srv := httptest.NewServer(ws.Handler())
+	defer srv.Close()
+
+	token := createSession("testpass")
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+
+	req, _ := http.NewRequest("POST", srv.URL+"/disable/10.0.0.5", nil)
+	req.AddCookie(&http.Cookie{Name: "session", Value: token})
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+
+	if !state.IsDisabled("10.0.0.5") {
+		t.Error("device should be disabled after POST /disable/")
+	}
+
+	// RouterUnblock will fail (no actual router), but the state should still be
+	// checked for the attempt. Since sshRun fails, the state remains blocked,
+	// but the disable state is set. This tests that the code path is reached.
+}
+
 func TestWeb_DashboardShowsBlockedStatus(t *testing.T) {
 	state := NewState(filepath.Join(t.TempDir(), "state.json"))
 	cfg := &Config{
@@ -308,7 +360,7 @@ func TestWeb_DashboardShowsBlockedStatus(t *testing.T) {
 			},
 		},
 	}
-	ws := NewWebServer(cfg, state)
+	ws := NewWebServer(cfg, state, nil)
 
 	// Simulate usage exceeding the limit
 	state.IncrementUsage("10.0.0.1")

@@ -6,10 +6,19 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+// SSHTarget holds connection details for an SSH host.
+type SSHTarget struct {
+	IP          string
+	User        string
+	Password    string
+	KeyPath     string
+}
 
 type Monitor struct {
 	config *Config
@@ -46,8 +55,22 @@ func (m *Monitor) tick() {
 }
 
 func (m *Monitor) checkDevice(dev *Device) {
-	online := ping(dev.IP)
+	var online bool
+	switch dev.DetectMethod {
+	case "router_conntrack":
+		online = m.routerDetectOnline(dev)
+	default:
+		online = ping(dev.IP)
+	}
 	m.state.SetOnline(dev.IP, online)
+
+	// Unblock logic for router-blocked devices
+	if dev.BlockMethod == "router" && m.state.IsRouterBlocked(dev.IP) {
+		if m.shouldUnblock(dev) {
+			log.Printf("Device %s (%s): unblocking on router", dev.Name, dev.IP)
+			m.RouterUnblock(dev)
+		}
+	}
 
 	if !online {
 		return
@@ -65,8 +88,8 @@ func (m *Monitor) checkDevice(dev *Device) {
 
 	// Check allowed hours
 	if !dev.Schedule.IsAllowedHour(now) {
-		log.Printf("Device %s (%s): outside allowed hours, shutting down", dev.Name, dev.IP)
-		m.halt(dev)
+		log.Printf("Device %s (%s): outside allowed hours, blocking", dev.Name, dev.IP)
+		m.block(dev)
 		return
 	}
 
@@ -75,20 +98,39 @@ func (m *Monitor) checkDevice(dev *Device) {
 	if limit >= 0 {
 		usage := m.state.GetUsageToday(dev.IP)
 		if usage >= limit {
-			log.Printf("Device %s (%s): daily limit reached (%d/%d min), shutting down", dev.Name, dev.IP, usage, limit)
-			m.halt(dev)
+			log.Printf("Device %s (%s): daily limit reached (%d/%d min), blocking", dev.Name, dev.IP, usage, limit)
+			m.block(dev)
 			return
 		}
 	}
 }
 
-func ping(ip string) bool {
-	cmd := exec.Command("ping", "-c", "1", "-W", "2", ip)
-	err := cmd.Run()
-	return err == nil
+// shouldUnblock returns true if a router-blocked device should be unblocked.
+func (m *Monitor) shouldUnblock(dev *Device) bool {
+	if m.state.IsDisabled(dev.IP) {
+		return true
+	}
+	now := time.Now()
+	if !dev.Schedule.IsAllowedHour(now) {
+		return false
+	}
+	limit := dev.Schedule.LimitForDay(now.Weekday())
+	if limit < 0 {
+		return true // unlimited
+	}
+	return m.state.GetUsageToday(dev.IP) < limit
 }
 
-func (m *Monitor) halt(dev *Device) {
+func (m *Monitor) block(dev *Device) {
+	switch dev.BlockMethod {
+	case "router":
+		m.routerBlock(dev)
+	default:
+		m.sshShutdown(dev)
+	}
+}
+
+func (m *Monitor) sshShutdown(dev *Device) {
 	var cmd string
 	switch dev.OS {
 	case "windows":
@@ -97,54 +139,131 @@ func (m *Monitor) halt(dev *Device) {
 		cmd = "sudo shutdown -h now"
 	}
 
-	err := sshRun(dev, cmd)
+	target := SSHTarget{
+		IP:       dev.IP,
+		User:     dev.SSHUser,
+		Password: dev.SSHPassword,
+		KeyPath:  dev.SSHKey,
+	}
+	err := sshRun(target, cmd)
 	if err != nil {
 		log.Printf("Failed to halt %s (%s): %v", dev.Name, dev.IP, err)
 	}
 }
 
-func sshRun(dev *Device, command string) error {
+func (m *Monitor) routerTarget() SSHTarget {
+	r := m.config.Router
+	return SSHTarget{
+		IP:       r.IP,
+		User:     r.SSHUser,
+		Password: r.SSHPassword,
+		KeyPath:  r.SSHKey,
+	}
+}
+
+func (m *Monitor) routerBlock(dev *Device) {
+	if m.state.IsRouterBlocked(dev.IP) {
+		return // already blocked
+	}
+	cmd := fmt.Sprintf("iptables -I FORWARD -m mac --mac-source %s -j DROP", dev.MAC)
+	err := sshRun(m.routerTarget(), cmd)
+	if err != nil {
+		log.Printf("Failed to router-block %s (%s): %v", dev.Name, dev.IP, err)
+		return
+	}
+	m.state.SetRouterBlocked(dev.IP, true)
+	log.Printf("Router-blocked %s (%s) MAC=%s", dev.Name, dev.IP, dev.MAC)
+}
+
+func (m *Monitor) RouterUnblock(dev *Device) {
+	if !m.state.IsRouterBlocked(dev.IP) {
+		return // not blocked
+	}
+	cmd := fmt.Sprintf("iptables -D FORWARD -m mac --mac-source %s -j DROP", dev.MAC)
+	err := sshRun(m.routerTarget(), cmd)
+	if err != nil {
+		log.Printf("Failed to router-unblock %s (%s): %v", dev.Name, dev.IP, err)
+		return
+	}
+	m.state.SetRouterBlocked(dev.IP, false)
+	log.Printf("Router-unblocked %s (%s) MAC=%s", dev.Name, dev.IP, dev.MAC)
+}
+
+// routerDetectOnline checks if a device is online by querying the router's ARP table.
+func (m *Monitor) routerDetectOnline(dev *Device) bool {
+	cmd := "cat /proc/net/arp"
+	output, err := sshRunOutput(m.routerTarget(), cmd)
+	if err != nil {
+		log.Printf("Failed to query router ARP table for %s: %v", dev.Name, err)
+		return false
+	}
+
+	macUpper := strings.ToUpper(dev.MAC)
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(strings.ToUpper(line), macUpper) {
+			// Check for the 0x2 flag (reachable)
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[2] == "0x2" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func ping(ip string) bool {
+	cmd := exec.Command("ping", "-c", "1", "-W", "2", ip)
+	err := cmd.Run()
+	return err == nil
+}
+
+func sshRun(target SSHTarget, command string) error {
+	_, err := sshRunOutput(target, command)
+	return err
+}
+
+func sshRunOutput(target SSHTarget, command string) (string, error) {
 	var authMethods []ssh.AuthMethod
-	if dev.SSHKey != "" {
-		signer, err := loadKeyFile(dev.SSHKey)
+	if target.KeyPath != "" {
+		signer, err := loadKeyFile(target.KeyPath)
 		if err != nil {
-			return fmt.Errorf("loading ssh key: %w", err)
+			return "", fmt.Errorf("loading ssh key: %w", err)
 		}
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
 	}
-	if dev.SSHPassword != "" {
-		authMethods = append(authMethods, ssh.Password(dev.SSHPassword))
+	if target.Password != "" {
+		authMethods = append(authMethods, ssh.Password(target.Password))
 	}
 
 	config := &ssh.ClientConfig{
-		User:            dev.SSHUser,
+		User:            target.User,
 		Auth:            authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         10 * time.Second,
 	}
 
-	addr := net.JoinHostPort(dev.IP, "22")
+	addr := net.JoinHostPort(target.IP, "22")
 	client, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
-		return fmt.Errorf("ssh dial: %w", err)
+		return "", fmt.Errorf("ssh dial: %w", err)
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		return fmt.Errorf("ssh session: %w", err)
+		return "", fmt.Errorf("ssh session: %w", err)
 	}
 	defer session.Close()
 
-	// shutdown commands typically kill the connection, so ignore EOF-like errors
-	if err := session.Run(command); err != nil {
+	output, err := session.CombinedOutput(command)
+	if err != nil {
 		// Connection drops are expected when shutting down
 		if _, ok := err.(*ssh.ExitMissingError); ok {
-			return nil
+			return string(output), nil
 		}
-		return fmt.Errorf("ssh run: %w", err)
+		return string(output), fmt.Errorf("ssh run: %w", err)
 	}
-	return nil
+	return string(output), nil
 }
 
 func loadKeyFile(path string) (ssh.Signer, error) {

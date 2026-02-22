@@ -13,6 +13,8 @@ type StateData struct {
 	DisabledUntil map[string]time.Time     `json:"disabled_until"`
 	// Online tracks last ping result per device
 	Online map[string]bool `json:"online"`
+	// RouterBlocked tracks which devices have an active firewall rule on the router
+	RouterBlocked map[string]bool `json:"router_blocked"`
 }
 
 type State struct {
@@ -25,9 +27,10 @@ func NewState(path string) *State {
 	return &State{
 		path: path,
 		data: StateData{
-			Usage:        make(map[string]map[string]int),
+			Usage:         make(map[string]map[string]int),
 			DisabledUntil: make(map[string]time.Time),
-			Online:       make(map[string]bool),
+			Online:        make(map[string]bool),
+			RouterBlocked: make(map[string]bool),
 		},
 	}
 }
@@ -57,6 +60,9 @@ func (s *State) Load() error {
 	}
 	if s.data.Online == nil {
 		s.data.Online = make(map[string]bool)
+	}
+	if s.data.RouterBlocked == nil {
+		s.data.RouterBlocked = make(map[string]bool)
 	}
 	s.pruneOldUsageLocked(7)
 	return nil
@@ -117,6 +123,21 @@ func (s *State) IsOnline(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.data.Online[ip]
+}
+
+// SetRouterBlocked sets whether a device is currently blocked via router firewall rule.
+func (s *State) SetRouterBlocked(ip string, blocked bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.RouterBlocked[ip] = blocked
+	s.saveLocked()
+}
+
+// IsRouterBlocked returns whether a device currently has an active router firewall rule.
+func (s *State) IsRouterBlocked(ip string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.RouterBlocked[ip]
 }
 
 // DisableFor sets a device as "disabled" (no blocking) for the given duration.
