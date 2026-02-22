@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,7 +12,16 @@ import (
 	"time"
 )
 
+const banner = `
+    __
+   (o o)   ParentalParrot
+   / V \   Device usage monitor
+  /(___)\
+   ^   ^
+`
+
 func main() {
+	fmt.Print(banner)
 	configPath := flag.String("config", "config.toml", "path to config file")
 	statePath := flag.String("state", "state.json", "path to state file")
 	listen := flag.String("listen", ":8080", "web UI listen address")

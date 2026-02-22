@@ -1,5 +1,13 @@
 # ParentalParrot
 
+```
+    __
+   (o o)   ParentalParrot
+   / V \   Device usage monitor
+  /(___)\
+   ^   ^
+```
+
 A lightweight Go application that monitors devices on your network via ping, tracks daily usage time, and shuts them down via SSH when time limits are exceeded or they're outside the allowed schedule. A web UI allows temporarily disabling the blockage.
 
 ## Features
