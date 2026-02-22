@@ -1,11 +1,9 @@
 # ParentalParrot
 
 ```
-    __
-   (o o)   ParentalParrot
-   / V \   Device usage monitor
-  /(___)\
-   ^   ^
+    ,///
+   (o  >    ParentalParrot
+    \_\>    Device usage monitor
 ```
 
 ## The Problem

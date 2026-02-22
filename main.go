@@ -13,11 +13,9 @@ import (
 )
 
 const banner = `
-    __
-   (o o)   ParentalParrot
-   / V \   Device usage monitor
-  /(___)\
-   ^   ^
+    ,///
+   (o  >    ParentalParrot
+    \_\>    Device usage monitor
 `
 
 func main() {
