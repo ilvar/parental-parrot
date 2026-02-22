@@ -1,0 +1,13 @@
+[Unit]
+Description=ParentalParrot - Device usage monitor and limiter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ParentalParrot -config /etc/parentalparrot/config.toml -state /var/lib/parentalparrot/state.json
+Restart=on-failure
+RestartSec=10
+WorkingDirectory=/var/lib/parentalparrot
+
+[Install]
+WantedBy=multi-user.target
