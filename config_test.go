@@ -193,6 +193,31 @@ all = 60
 	}
 }
 
+func TestLoadConfig_MacOS(t *testing.T) {
+	content := `
+ui_password = "x"
+[[devices]]
+name = "Mac"
+ip = "1.2.3.4"
+ssh_user = "u"
+ssh_password = "p"
+os = "macOS"
+
+[devices.schedule]
+all = 60
+`
+	path := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Devices[0].OS != "macos" {
+		t.Errorf("OS = %q, want %q (should be lowercased)", cfg.Devices[0].OS, "macos")
+	}
+}
+
 func TestLoadConfig_InvalidOS(t *testing.T) {
 	content := `
 ui_password = "x"

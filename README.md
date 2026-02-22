@@ -18,7 +18,7 @@ ParentalParrot takes a different approach: it runs on your network as a single s
 - Per-day time limits with flexible scheduling (all days / weekday+weekend / individual days)
 - Allowed hours window (e.g. 08:00-21:00)
 - Two blocking methods:
-  - **SSH shutdown** for computers (Linux and Windows)
+  - **SSH shutdown** for computers (Linux, macOS, and Windows)
   - **Router firewall rules** for phones, tablets, and TVs via OpenWRT (iptables MAC-based blocking)
 - Two detection methods:
   - **Ping** for devices that respond to ICMP
@@ -63,7 +63,7 @@ name = "Kids PC"
 ip = "192.168.1.100"
 ssh_user = "admin"
 ssh_password = "password"
-os = "linux"  # "linux" or "windows"
+os = "linux"  # "linux", "macos", or "windows"
 # block_method = "ssh_shutdown"  # default
 # detect_method = "ping"         # default
 
@@ -96,6 +96,7 @@ Per-day override > weekday/weekend > all. If nothing is set, the device has unli
 The SSH user on the target device needs permission to run the shutdown command:
 
 - **Linux**: `sudo shutdown -h now` — add a sudoers rule like `admin ALL=(ALL) NOPASSWD: /sbin/shutdown`
+- **macOS**: `sudo shutdown -h now` — enable Remote Login in System Settings > General > Sharing, and add the same sudoers rule as Linux
 - **Windows**: `shutdown /s /t 0` — the SSH user needs to be an administrator
 
 ## CLI Flags

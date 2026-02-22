@@ -130,8 +130,8 @@ func LoadConfig(path string) (*Config, error) {
 		if d.OS == "" {
 			d.OS = "linux"
 		}
-		if d.OS != "linux" && d.OS != "windows" {
-			return nil, fmt.Errorf("device %q: unsupported OS %q (use linux or windows)", d.Name, d.OS)
+		if d.OS != "linux" && d.OS != "windows" && d.OS != "macos" {
+			return nil, fmt.Errorf("device %q: unsupported OS %q (use linux, macos, or windows)", d.Name, d.OS)
 		}
 
 		if d.BlockMethod == "" {
