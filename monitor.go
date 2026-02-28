@@ -14,10 +14,10 @@ import (
 
 // SSHTarget holds connection details for an SSH host.
 type SSHTarget struct {
-	IP          string
-	User        string
-	Password    string
-	KeyPath     string
+	IP       string
+	User     string
+	Password string
+	KeyPath  string
 }
 
 type Monitor struct {
@@ -54,6 +54,15 @@ func (m *Monitor) tick() {
 	}
 }
 
+// totalUsageToday returns the sum of today's usage across all configured devices (for root schedule).
+func (m *Monitor) totalUsageToday() int {
+	var total int
+	for i := range m.config.Devices {
+		total += m.state.GetUsageToday(m.config.Devices[i].IP)
+	}
+	return total
+}
+
 func (m *Monitor) checkDevice(dev *Device) {
 	var online bool
 	switch dev.DetectMethod {
@@ -86,14 +95,30 @@ func (m *Monitor) checkDevice(dev *Device) {
 
 	now := time.Now()
 
-	// Check allowed hours
-	if !dev.Schedule.IsAllowedHour(now) {
+	// Allowed hours: root schedule overrides if it has allowed_hours, else per-device
+	schedForHours := &dev.Schedule
+	if m.config.Schedule != nil && m.config.Schedule.AllowedHours != nil {
+		schedForHours = m.config.Schedule
+	}
+	if !schedForHours.IsAllowedHour(now) {
 		log.Printf("Device %s (%s): outside allowed hours, blocking", dev.Name, dev.IP)
 		m.block(dev)
 		return
 	}
 
-	// Check daily limit
+	// Daily limit: root schedule = shared pool across all devices; else per-device
+	if m.config.Schedule != nil {
+		rootLimit := m.config.Schedule.LimitForDay(now.Weekday())
+		if rootLimit >= 0 {
+			total := m.totalUsageToday()
+			if total >= rootLimit {
+				log.Printf("Device %s (%s): shared daily limit reached (%d/%d min), blocking", dev.Name, dev.IP, total, rootLimit)
+				m.block(dev)
+				return
+			}
+			return
+		}
+	}
 	limit := dev.Schedule.LimitForDay(now.Weekday())
 	if limit >= 0 {
 		usage := m.state.GetUsageToday(dev.IP)
@@ -111,8 +136,18 @@ func (m *Monitor) shouldUnblock(dev *Device) bool {
 		return true
 	}
 	now := time.Now()
-	if !dev.Schedule.IsAllowedHour(now) {
+	schedForHours := &dev.Schedule
+	if m.config.Schedule != nil && m.config.Schedule.AllowedHours != nil {
+		schedForHours = m.config.Schedule
+	}
+	if !schedForHours.IsAllowedHour(now) {
 		return false
+	}
+	if m.config.Schedule != nil {
+		rootLimit := m.config.Schedule.LimitForDay(now.Weekday())
+		if rootLimit >= 0 {
+			return m.totalUsageToday() < rootLimit
+		}
 	}
 	limit := dev.Schedule.LimitForDay(now.Weekday())
 	if limit < 0 {

@@ -20,7 +20,7 @@ const banner = `
 
 func main() {
 	fmt.Print(banner)
-	configPath := flag.String("config", "config.toml", "path to config file")
+	configPath := flag.String("config", "config.yaml", "path to config file")
 	statePath := flag.String("state", "state.json", "path to state file")
 	listen := flag.String("listen", ":8080", "web UI listen address")
 	flag.Parse()

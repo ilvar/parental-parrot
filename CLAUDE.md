@@ -14,7 +14,7 @@ make dist     # cross-compile for linux/darwin/windows amd64+arm64
 
 All source is in the root package (`package main`):
 
-- `config.go` — Config/Device/Router/Schedule structs, TOML parsing, validation
+- `config.go` — Config/Device/Router/Schedule structs, YAML parsing, validation
 - `state.go` — Persistent JSON state (usage, online status, disabled-until, router-blocked)
 - `monitor.go` — Main loop: ping/conntrack detection, usage tracking, block/unblock dispatch, SSH operations
 - `web.go` — HTTP dashboard with login, device status, disable button

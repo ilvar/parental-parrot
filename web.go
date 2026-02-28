@@ -85,11 +85,18 @@ type DeviceStatus struct {
 	Online        bool
 	UsageToday    int
 	Limit         int
+	SharedPool    bool // when true, limit is from root schedule (shared)
 	Disabled      bool
 	DisabledUntil string
 	Blocked       bool
 	UsagePercent  int
 	UsageClass    string
+}
+
+// RootScheduleStatus is set when config has a root schedule with a daily limit (shared pool).
+type RootScheduleStatus struct {
+	TotalUsage int
+	Limit      int
 }
 
 func (ws *WebServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -99,17 +106,54 @@ func (ws *WebServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	var totalUsage int
+	for _, dev := range ws.config.Devices {
+		totalUsage += ws.state.GetUsageToday(dev.IP)
+	}
+
+	var rootStatus *RootScheduleStatus
+	var rootUsagePercent int
+	var rootUsageClass string
+	if ws.config.Schedule != nil {
+		rootLimit := ws.config.Schedule.LimitForDay(now.Weekday())
+		if rootLimit >= 0 {
+			rootStatus = &RootScheduleStatus{TotalUsage: totalUsage, Limit: rootLimit}
+			if rootLimit > 0 {
+				rootUsagePercent = totalUsage * 100 / rootLimit
+				if rootUsagePercent > 100 {
+					rootUsagePercent = 100
+				}
+				if totalUsage >= rootLimit {
+					rootUsageClass = "over"
+				} else if totalUsage > rootLimit/2 {
+					rootUsageClass = "warn"
+				} else {
+					rootUsageClass = "ok"
+				}
+			}
+		}
+	}
+
 	var devices []DeviceStatus
 	for _, dev := range ws.config.Devices {
 		usage := ws.state.GetUsageToday(dev.IP)
 		limit := dev.Schedule.LimitForDay(now.Weekday())
+		if rootStatus != nil {
+			limit = -1 // per-device limit not used when root schedule defines shared pool
+		}
 		disabled := ws.state.IsDisabled(dev.IP)
 		online := ws.state.IsOnline(dev.IP)
 
+		schedForHours := &dev.Schedule
+		if ws.config.Schedule != nil && ws.config.Schedule.AllowedHours != nil {
+			schedForHours = ws.config.Schedule
+		}
 		blocked := false
 		if !disabled {
-			if !dev.Schedule.IsAllowedHour(now) {
+			if !schedForHours.IsAllowedHour(now) {
 				blocked = true
+			} else if rootStatus != nil {
+				blocked = totalUsage >= rootStatus.Limit
 			} else if limit >= 0 && usage >= limit {
 				blocked = true
 			}
@@ -122,7 +166,10 @@ func (ws *WebServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 		usagePercent := 0
 		usageClass := "ok"
-		if limit > 0 {
+		if rootStatus != nil && rootStatus.Limit > 0 {
+			usagePercent = rootUsagePercent
+			usageClass = rootUsageClass
+		} else if limit > 0 {
 			usagePercent = usage * 100 / limit
 			if usagePercent > 100 {
 				usagePercent = 100
@@ -141,6 +188,7 @@ func (ws *WebServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			Online:        online,
 			UsageToday:    usage,
 			Limit:         limit,
+			SharedPool:    rootStatus != nil,
 			Disabled:      disabled,
 			DisabledUntil: disabledUntilStr,
 			Blocked:       blocked,
@@ -150,7 +198,10 @@ func (ws *WebServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	renderTemplate(w, dashboardTmpl, map[string]any{
-		"Devices": devices,
+		"Devices":          devices,
+		"RootSchedule":     rootStatus,
+		"RootUsagePercent": rootUsagePercent,
+		"RootUsageClass":   rootUsageClass,
 	})
 }
 
@@ -312,6 +363,14 @@ const dashboardTmpl = `<!DOCTYPE html>
         <h1>ParentalParrot</h1>
         <a href="/logout" class="logout">Logout</a>
     </div>
+    {{if .RootSchedule}}
+    <div class="shared-pool" style="background:#e3f2fd; padding:0.75rem 1rem; border-radius:8px; margin-bottom:1rem;">
+        <div class="info">Shared pool (all devices): <strong>{{.RootSchedule.TotalUsage}} min</strong> / {{.RootSchedule.Limit}} min per day</div>
+        <div class="usage-bar" style="margin-top:0.5rem;">
+            <div class="usage-fill {{.RootUsageClass}}" style="width: {{.RootUsagePercent}}%"></div>
+        </div>
+    </div>
+    {{end}}
     <div class="devices">
         {{range .Devices}}
         <div class="device">
@@ -324,7 +383,7 @@ const dashboardTmpl = `<!DOCTYPE html>
             <div class="info">IP: <strong>{{.IP}}</strong> | OS: <strong>{{.OS}}</strong></div>
             <div class="info">
                 Usage today: <strong>{{.UsageToday}} min</strong>
-                {{if ge .Limit 0}} / {{.Limit}} min{{else}} (unlimited){{end}}
+                {{if .SharedPool}}(shared pool){{else if ge .Limit 0}} / {{.Limit}} min{{else}} (unlimited){{end}}
             </div>
             {{if ge .Limit 0}}
             <div class="usage-bar">

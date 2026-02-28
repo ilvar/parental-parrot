@@ -102,6 +102,34 @@ func TestMonitor_ShouldUnblock_Unlimited(t *testing.T) {
 	}
 }
 
+func TestMonitor_ShouldUnblock_RootSchedule(t *testing.T) {
+	state := NewState(filepath.Join(t.TempDir(), "state.json"))
+	cfg := &Config{
+		Router:   &Router{IP: "192.168.1.1", SSHUser: "root", SSHPassword: "pass"},
+		Schedule: &Schedule{All: intPtr(5)}, // 5 min shared pool
+		Devices: []Device{
+			{Name: "PC", IP: "10.0.0.1", MAC: "AA:BB:CC:DD:EE:01", BlockMethod: "router", DetectMethod: "ping", Schedule: Schedule{All: intPtr(120)}},
+			{Name: "Phone", IP: "10.0.0.5", MAC: "AA:BB:CC:DD:EE:FF", BlockMethod: "router", DetectMethod: "ping", Schedule: Schedule{All: intPtr(120)}},
+		},
+	}
+	m := NewMonitor(cfg, state)
+
+	// Total 3 min (PC 2, Phone 1) < 5 → should unblock
+	state.IncrementUsage("10.0.0.1")
+	state.IncrementUsage("10.0.0.1")
+	state.IncrementUsage("10.0.0.5")
+	if !m.shouldUnblock(&cfg.Devices[0]) || !m.shouldUnblock(&cfg.Devices[1]) {
+		t.Error("should unblock when shared pool total under limit")
+	}
+
+	// Total 5 min (add 2 more) → at limit, should not unblock
+	state.IncrementUsage("10.0.0.5")
+	state.IncrementUsage("10.0.0.5")
+	if m.shouldUnblock(&cfg.Devices[0]) || m.shouldUnblock(&cfg.Devices[1]) {
+		t.Error("should not unblock when shared pool total at or over limit")
+	}
+}
+
 func TestMonitor_BlockDispatch_DefaultSSHShutdown(t *testing.T) {
 	state := NewState(filepath.Join(t.TempDir(), "state.json"))
 	cfg := &Config{

@@ -6,53 +6,56 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BurntSushi/toml"
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	UIPassword string   `toml:"ui_password"`
-	Router     *Router  `toml:"router"`
-	Devices    []Device `toml:"devices"`
+	UIPassword string   `yaml:"ui_password"`
+	Router     *Router  `yaml:"router"`
+	Devices    []Device `yaml:"devices"`
+	// Schedule is an optional root schedule: when set, schedule.all (and weekday/weekend/per-day)
+	// define a shared daily limit across all devices (e.g. schedule.all: 120 = 2 hours total per day).
+	Schedule *Schedule `yaml:"schedule"`
 }
 
 type Router struct {
-	IP          string `toml:"ip"`
-	SSHUser     string `toml:"ssh_user"`
-	SSHPassword string `toml:"ssh_password"`
-	SSHKey      string `toml:"ssh_key"`
+	IP          string `yaml:"ip"`
+	SSHUser     string `yaml:"ssh_user"`
+	SSHPassword string `yaml:"ssh_password"`
+	SSHKey      string `yaml:"ssh_key"`
 }
 
 type Device struct {
-	Name         string   `toml:"name"`
-	IP           string   `toml:"ip"`
-	SSHUser      string   `toml:"ssh_user"`
-	SSHPassword  string   `toml:"ssh_password"`
-	SSHKey       string   `toml:"ssh_key"` // path to private key file
-	OS           string   `toml:"os"`
-	MAC          string   `toml:"mac"`
-	BlockMethod  string   `toml:"block_method"`  // "ssh_shutdown" (default) or "router"
-	DetectMethod string   `toml:"detect_method"` // "ping" (default) or "router_conntrack"
-	Schedule     Schedule `toml:"schedule"`
+	Name         string   `yaml:"name"`
+	IP           string   `yaml:"ip"`
+	SSHUser      string   `yaml:"ssh_user"`
+	SSHPassword  string   `yaml:"ssh_password"`
+	SSHKey       string   `yaml:"ssh_key"` // path to private key file
+	OS           string   `yaml:"os"`
+	MAC          string   `yaml:"mac"`
+	BlockMethod  string   `yaml:"block_method"`  // "ssh_shutdown" (default) or "router"
+	DetectMethod string   `yaml:"detect_method"` // "ping" (default) or "router_conntrack"
+	Schedule     Schedule `yaml:"schedule"`
 }
 
 type AllowedHours struct {
-	Start string `toml:"start"`
-	End   string `toml:"end"`
+	Start string `yaml:"start"`
+	End   string `yaml:"end"`
 }
 
 type Schedule struct {
-	All      *int `toml:"all"`
-	Weekday  *int `toml:"weekday"`
-	Weekend  *int `toml:"weekend"`
-	Monday   *int `toml:"monday"`
-	Tuesday  *int `toml:"tuesday"`
-	Wednesday *int `toml:"wednesday"`
-	Thursday *int `toml:"thursday"`
-	Friday   *int `toml:"friday"`
-	Saturday *int `toml:"saturday"`
-	Sunday   *int `toml:"sunday"`
+	All       *int `yaml:"all"`
+	Weekday   *int `yaml:"weekday"`
+	Weekend   *int `yaml:"weekend"`
+	Monday    *int `yaml:"monday"`
+	Tuesday   *int `yaml:"tuesday"`
+	Wednesday *int `yaml:"wednesday"`
+	Thursday  *int `yaml:"thursday"`
+	Friday    *int `yaml:"friday"`
+	Saturday  *int `yaml:"saturday"`
+	Sunday    *int `yaml:"sunday"`
 
-	AllowedHours *AllowedHours `toml:"allowed_hours"`
+	AllowedHours *AllowedHours `yaml:"allowed_hours"`
 }
 
 // LimitForDay returns the daily time limit in minutes for the given weekday.
@@ -121,7 +124,7 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 

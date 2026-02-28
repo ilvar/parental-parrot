@@ -107,34 +107,29 @@ func TestSchedule_IsAllowedHour_EmptyFields(t *testing.T) {
 
 func TestLoadConfig(t *testing.T) {
 	content := `
-ui_password = "testpass"
+ui_password: "testpass"
 
-[[devices]]
-name = "Test PC"
-ip = "10.0.0.1"
-ssh_user = "user"
-ssh_password = "pass"
-os = "linux"
-
-[devices.schedule]
-weekday = 60
-weekend = 120
-
-[devices.schedule.allowed_hours]
-start = "09:00"
-end = "20:00"
-
-[[devices]]
-name = "Win PC"
-ip = "10.0.0.2"
-ssh_user = "admin"
-ssh_password = "pass2"
-os = "Windows"
-
-[devices.schedule]
-all = 90
+devices:
+  - name: "Test PC"
+    ip: "10.0.0.1"
+    ssh_user: user
+    ssh_password: pass
+    os: linux
+    schedule:
+      weekday: 60
+      weekend: 120
+      allowed_hours:
+        start: "09:00"
+        end: "20:00"
+  - name: "Win PC"
+    ip: "10.0.0.2"
+    ssh_user: admin
+    ssh_password: pass2
+    os: Windows
+    schedule:
+      all: 90
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	cfg, err := LoadConfig(path)
@@ -171,17 +166,16 @@ all = 90
 
 func TestLoadConfig_DefaultOS(t *testing.T) {
 	content := `
-ui_password = "x"
-[[devices]]
-name = "D"
-ip = "1.2.3.4"
-ssh_user = "u"
-ssh_password = "p"
-
-[devices.schedule]
-all = 60
+ui_password: "x"
+devices:
+  - name: "D"
+    ip: "1.2.3.4"
+    ssh_user: u
+    ssh_password: p
+    schedule:
+      all: 60
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	cfg, err := LoadConfig(path)
@@ -195,18 +189,17 @@ all = 60
 
 func TestLoadConfig_MacOS(t *testing.T) {
 	content := `
-ui_password = "x"
-[[devices]]
-name = "Mac"
-ip = "1.2.3.4"
-ssh_user = "u"
-ssh_password = "p"
-os = "macOS"
-
-[devices.schedule]
-all = 60
+ui_password: "x"
+devices:
+  - name: "Mac"
+    ip: "1.2.3.4"
+    ssh_user: u
+    ssh_password: p
+    os: macOS
+    schedule:
+      all: 60
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	cfg, err := LoadConfig(path)
@@ -220,18 +213,17 @@ all = 60
 
 func TestLoadConfig_InvalidOS(t *testing.T) {
 	content := `
-ui_password = "x"
-[[devices]]
-name = "D"
-ip = "1.2.3.4"
-ssh_user = "u"
-ssh_password = "p"
-os = "freebsd"
-
-[devices.schedule]
-all = 60
+ui_password: "x"
+devices:
+  - name: "D"
+    ip: "1.2.3.4"
+    ssh_user: u
+    ssh_password: p
+    os: freebsd
+    schedule:
+      all: 60
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	_, err := LoadConfig(path)
@@ -241,7 +233,7 @@ all = 60
 }
 
 func TestLoadConfig_FileNotFound(t *testing.T) {
-	_, err := LoadConfig("/nonexistent/config.toml")
+	_, err := LoadConfig("/nonexistent/config.yaml")
 	if err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}
@@ -249,24 +241,23 @@ func TestLoadConfig_FileNotFound(t *testing.T) {
 
 func TestLoadConfig_RouterConfig(t *testing.T) {
 	content := `
-ui_password = "x"
+ui_password: "x"
 
-[router]
-ip = "192.168.1.1"
-ssh_user = "root"
-ssh_key = "/home/user/.ssh/id_ed25519"
+router:
+  ip: "192.168.1.1"
+  ssh_user: root
+  ssh_key: "/home/user/.ssh/id_ed25519"
 
-[[devices]]
-name = "Phone"
-ip = "192.168.1.150"
-mac = "AA:BB:CC:DD:EE:FF"
-block_method = "router"
-detect_method = "router_conntrack"
-
-[devices.schedule]
-all = 120
+devices:
+  - name: "Phone"
+    ip: "192.168.1.150"
+    mac: "AA:BB:CC:DD:EE:FF"
+    block_method: router
+    detect_method: router_conntrack
+    schedule:
+      all: 120
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	cfg, err := LoadConfig(path)
@@ -298,22 +289,21 @@ all = 120
 
 func TestLoadConfig_RouterBlockMethodRequiresMAC(t *testing.T) {
 	content := `
-ui_password = "x"
+ui_password: "x"
 
-[router]
-ip = "192.168.1.1"
-ssh_user = "root"
-ssh_password = "pass"
+router:
+  ip: "192.168.1.1"
+  ssh_user: root
+  ssh_password: pass
 
-[[devices]]
-name = "Phone"
-ip = "192.168.1.150"
-block_method = "router"
-
-[devices.schedule]
-all = 120
+devices:
+  - name: "Phone"
+    ip: "192.168.1.150"
+    block_method: router
+    schedule:
+      all: 120
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	_, err := LoadConfig(path)
@@ -324,18 +314,17 @@ all = 120
 
 func TestLoadConfig_RouterBlockMethodRequiresRouterSection(t *testing.T) {
 	content := `
-ui_password = "x"
+ui_password: "x"
 
-[[devices]]
-name = "Phone"
-ip = "192.168.1.150"
-mac = "AA:BB:CC:DD:EE:FF"
-block_method = "router"
-
-[devices.schedule]
-all = 120
+devices:
+  - name: "Phone"
+    ip: "192.168.1.150"
+    mac: "AA:BB:CC:DD:EE:FF"
+    block_method: router
+    schedule:
+      all: 120
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	_, err := LoadConfig(path)
@@ -346,17 +335,16 @@ all = 120
 
 func TestLoadConfig_ConntrackRequiresRouterSection(t *testing.T) {
 	content := `
-ui_password = "x"
+ui_password: "x"
 
-[[devices]]
-name = "Phone"
-ip = "192.168.1.150"
-detect_method = "router_conntrack"
-
-[devices.schedule]
-all = 120
+devices:
+  - name: "Phone"
+    ip: "192.168.1.150"
+    detect_method: router_conntrack
+    schedule:
+      all: 120
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	_, err := LoadConfig(path)
@@ -367,17 +355,16 @@ all = 120
 
 func TestLoadConfig_DefaultBlockAndDetectMethod(t *testing.T) {
 	content := `
-ui_password = "x"
-[[devices]]
-name = "D"
-ip = "1.2.3.4"
-ssh_user = "u"
-ssh_password = "p"
-
-[devices.schedule]
-all = 60
+ui_password: "x"
+devices:
+  - name: "D"
+    ip: "1.2.3.4"
+    ssh_user: u
+    ssh_password: p
+    schedule:
+      all: 60
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	cfg, err := LoadConfig(path)
@@ -394,18 +381,17 @@ all = 60
 
 func TestLoadConfig_InvalidBlockMethod(t *testing.T) {
 	content := `
-ui_password = "x"
-[[devices]]
-name = "D"
-ip = "1.2.3.4"
-ssh_user = "u"
-ssh_password = "p"
-block_method = "magic"
-
-[devices.schedule]
-all = 60
+ui_password: "x"
+devices:
+  - name: "D"
+    ip: "1.2.3.4"
+    ssh_user: u
+    ssh_password: p
+    block_method: magic
+    schedule:
+      all: 60
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	_, err := LoadConfig(path)
@@ -416,18 +402,17 @@ all = 60
 
 func TestLoadConfig_InvalidDetectMethod(t *testing.T) {
 	content := `
-ui_password = "x"
-[[devices]]
-name = "D"
-ip = "1.2.3.4"
-ssh_user = "u"
-ssh_password = "p"
-detect_method = "magic"
-
-[devices.schedule]
-all = 60
+ui_password: "x"
+devices:
+  - name: "D"
+    ip: "1.2.3.4"
+    ssh_user: u
+    ssh_password: p
+    detect_method: magic
+    schedule:
+      all: 60
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	_, err := LoadConfig(path)
@@ -438,17 +423,16 @@ all = 60
 
 func TestLoadConfig_SSHKey(t *testing.T) {
 	content := `
-ui_password = "x"
-[[devices]]
-name = "D"
-ip = "1.2.3.4"
-ssh_user = "u"
-ssh_key = "/home/user/.ssh/id_ed25519"
-
-[devices.schedule]
-all = 60
+ui_password: "x"
+devices:
+  - name: "D"
+    ip: "1.2.3.4"
+    ssh_user: u
+    ssh_key: "/home/user/.ssh/id_ed25519"
+    schedule:
+      all: 60
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte(content), 0644)
 
 	cfg, err := LoadConfig(path)
@@ -460,5 +444,49 @@ all = 60
 	}
 	if cfg.Devices[0].SSHPassword != "" {
 		t.Errorf("SSHPassword = %q, want empty", cfg.Devices[0].SSHPassword)
+	}
+}
+
+func TestLoadConfig_RootSchedule(t *testing.T) {
+	content := `
+ui_password: "x"
+schedule:
+  all: 120
+  allowed_hours:
+    start: "08:00"
+    end: "21:00"
+devices:
+  - name: "PC"
+    ip: "10.0.0.1"
+    ssh_user: u
+    ssh_password: p
+    schedule:
+      all: 60
+  - name: "Phone"
+    ip: "10.0.0.2"
+    ssh_user: u
+    ssh_password: p
+    schedule:
+      weekday: 30
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Schedule == nil {
+		t.Fatal("root Schedule should be set")
+	}
+	if cfg.Schedule.LimitForDay(time.Monday) != 120 {
+		t.Errorf("root Schedule LimitForDay(Monday) = %d, want 120", cfg.Schedule.LimitForDay(time.Monday))
+	}
+	if cfg.Schedule.AllowedHours == nil || cfg.Schedule.AllowedHours.Start != "08:00" || cfg.Schedule.AllowedHours.End != "21:00" {
+		t.Errorf("root Schedule allowed_hours = %+v", cfg.Schedule.AllowedHours)
+	}
+	// Per-device schedules still parsed
+	if cfg.Devices[0].Schedule.LimitForDay(time.Monday) != 60 {
+		t.Errorf("device 0 limit = %d, want 60", cfg.Devices[0].Schedule.LimitForDay(time.Monday))
 	}
 }
