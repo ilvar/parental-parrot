@@ -26,7 +26,7 @@ func testWebServer(t *testing.T) (*WebServer, *State) {
 			},
 		},
 	}
-	return NewWebServer(cfg, state, nil), state
+	return NewWebServer(cfg, state, nil, nil), state
 }
 
 func TestSession_CreateAndValidate(t *testing.T) {
@@ -311,7 +311,7 @@ func TestWeb_DisableUnblocksRouterDevice(t *testing.T) {
 		},
 	}
 	monitor := NewMonitor(cfg, state)
-	ws := NewWebServer(cfg, state, monitor)
+	ws := NewWebServer(cfg, state, monitor, nil)
 
 	// Simulate the device being router-blocked
 	state.SetRouterBlocked("10.0.0.5", true)
@@ -360,7 +360,7 @@ func TestWeb_DashboardShowsBlockedStatus(t *testing.T) {
 			},
 		},
 	}
-	ws := NewWebServer(cfg, state, nil)
+	ws := NewWebServer(cfg, state, nil, nil)
 
 	// Simulate usage exceeding the limit
 	state.IncrementUsage("10.0.0.1")

@@ -10,9 +10,11 @@ import (
 )
 
 type Config struct {
-	UIPassword string   `yaml:"ui_password"`
-	Router     *Router  `yaml:"router"`
-	Devices    []Device `yaml:"devices"`
+	UIPassword         string   `yaml:"ui_password"`
+	DefaultRouterBlock bool     `yaml:"default_router_block"` // when true, new devices default to block_method=router + detect_method=router_conntrack
+	TrafficThreshold   int      `yaml:"traffic_threshold"`    // min conntrack entries to consider device "active" (default 1)
+	Router             *Router  `yaml:"router"`
+	Devices            []Device `yaml:"devices"`
 	// Schedule is an optional root schedule: when set, schedule.all (and weekday/weekend/per-day)
 	// define a shared daily limit across all devices (e.g. schedule.all: 120 = 2 hours total per day).
 	Schedule *Schedule `yaml:"schedule"`

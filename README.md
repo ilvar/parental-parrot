@@ -22,11 +22,12 @@ ParentalParrot takes a different approach: it runs on your network as a single s
   - **Router firewall rules** for phones, tablets, and TVs via OpenWRT (iptables MAC-based blocking)
 - Two detection methods:
   - **Ping** for devices that respond to ICMP
-  - **Router ARP table** for devices that don't (many phones/tablets drop pings)
+  - **Router conntrack** for devices that don't (phones, tablets, TVs): usage is counted only when the router's conntrack table shows **active traffic** from the device (e.g. streaming). A device merely connected (e.g. TV in sleep) is not counted until it actually sends traffic.
 - Automatic unblocking when limits reset, allowed hours resume, or blocking is manually disabled
 - SSH key and password authentication
 - Web dashboard with login, usage bars, and "Disable for 1 hour" button
-- Persistent state across restarts (JSON file, auto-prunes entries older than 7 days)
+- **Settings UI** — edit all config (password, root schedule, router, devices) in the browser; no YAML editing
+- **SQLite** — config and state live in one database; if the DB is empty on first run, it is seeded from `config.example.yaml`
 - Graceful shutdown on SIGINT/SIGTERM
 
 ## Quick Start
@@ -35,17 +36,55 @@ ParentalParrot takes a different approach: it runs on your network as a single s
 # Build
 make build
 
-# Edit config
-cp config.yaml my-config.yaml
-vim my-config.yaml
-
-# Run
-./ParentalParrot -config my-config.yaml
+# Run (creates parentalparrot.db if missing; seeds from config.example.yaml when DB is empty)
+./ParentalParrot -db parentalparrot.db -seed config.example.yaml
 ```
 
-Open http://localhost:8080 and log in with the password from your config.
+Open http://localhost:8080, log in (default password from example: `secret123`), then go to **Settings** to change the UI password, root schedule, router, and devices. No config file to edit by hand.
 
-## Configuration
+## Docker
+
+### Using Docker Compose (recommended)
+
+```bash
+# Build and start (detached)
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
+The database is stored in a named volume `parentalparrot-data`. To reset everything, remove the volume:
+
+```bash
+docker compose down -v
+docker compose up -d
+```
+
+### Using Docker only
+
+```bash
+# Build the image
+docker build -t parentalparrot .
+
+# Run (creates a volume for the DB)
+docker run -d -p 8080:8080 -v parentalparrot-data:/data --name parentalparrot parentalparrot
+
+# Reset UI password (e.g. if you forgot it)
+docker run --rm -v parentalparrot-data:/data parentalparrot -db /data/parentalparrot.db -reset-password yournewpassword
+
+# Stop and remove container (volume keeps data)
+docker stop parentalparrot && docker rm parentalparrot
+```
+
+In both cases, open http://localhost:8080 (or https://localhost:8080 if you use a reverse proxy). First run seeds the DB from the bundled `config.example.yaml`; change the password and all settings in the **Settings** page.
+
+## Configuration (stored in DB; optional example YAML for seed)
+
+The app uses SQLite as the main store. On first run with an empty DB, it loads `config.example.yaml` to populate config and devices. After that, change everything from the **Settings** page in the UI. The example YAML is for reference and initial seed only:
 
 ```yaml
 ui_password: "secret123"
@@ -58,7 +97,8 @@ ui_password: "secret123"
 #     start: "08:00"
 #     end: "21:00"
 
-# Required for block_method = "router" or detect_method = "router_conntrack"
+# Required for block_method = "router" or detect_method = "router_conntrack".
+# For router_conntrack the router must have /proc/net/nf_conntrack (standard on OpenWRT).
 # router:
 #   ip: "192.168.1.1"
 #   ssh_user: "root"
@@ -160,8 +200,9 @@ Use `ssh_user = "parentalparrot"` and `ssh_password` in your device config.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-config` | `config.yaml` | Path to config file |
-| `-state` | `state.json` | Path to state file |
+| `-db` | `parentalparrot.db` | Path to SQLite database |
+| `-seed` | `config.example.yaml` | YAML file to seed DB when empty |
+| `-reset-password` | (none) | Set to a new password to update UI password in DB and exit (e.g. `-reset-password=newpass`) |
 | `-listen` | `:8080` | Web UI listen address |
 
 ## Cross-Platform Build
@@ -177,12 +218,12 @@ ls dist/
 ## Install as systemd Service
 
 ```bash
-# Copy binary and config
+# Copy binary and (optional) example config for first-time seed
 sudo cp ParentalParrot /usr/local/bin/
 sudo mkdir -p /etc/parentalparrot /var/lib/parentalparrot
-sudo cp config.yaml /etc/parentalparrot/
+sudo cp config.example.yaml /etc/parentalparrot/
 
-# Install and start service
+# Install and start service (uses /var/lib/parentalparrot/parentalparrot.db by default)
 sudo cp parentalparrot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now parentalparrot

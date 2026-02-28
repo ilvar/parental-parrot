@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"sync"
@@ -9,8 +10,8 @@ import (
 
 type StateData struct {
 	// Usage[deviceIP][dateString] = minutes used
-	Usage        map[string]map[string]int `json:"usage"`
-	DisabledUntil map[string]time.Time     `json:"disabled_until"`
+	Usage         map[string]map[string]int `json:"usage"`
+	DisabledUntil map[string]time.Time      `json:"disabled_until"`
 	// Online tracks last ping result per device
 	Online map[string]bool `json:"online"`
 	// RouterBlocked tracks which devices have an active firewall rule on the router
@@ -21,6 +22,7 @@ type State struct {
 	mu   sync.Mutex
 	data StateData
 	path string
+	db   *sql.DB
 }
 
 func NewState(path string) *State {
@@ -35,10 +37,18 @@ func NewState(path string) *State {
 	}
 }
 
+// NewStateDB returns a State that uses SQLite for persistence (path unused).
+func NewStateDB(db *sql.DB) *State {
+	return &State{path: "", db: db}
+}
+
 func (s *State) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	if s.db != nil {
+		dbPruneOldUsage(s.db, 7)
+		return nil
+	}
 	f, err := os.Open(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -71,6 +81,9 @@ func (s *State) Load() error {
 func (s *State) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		return nil // no-op; DB is always persisted
+	}
 	return s.saveLocked()
 }
 
@@ -90,7 +103,10 @@ func dateKey(t time.Time) string {
 func (s *State) IncrementUsage(ip string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	if s.db != nil {
+		_ = dbIncrementUsage(s.db, ip)
+		return
+	}
 	today := dateKey(time.Now())
 	if s.data.Usage[ip] == nil {
 		s.data.Usage[ip] = make(map[string]int)
@@ -103,7 +119,9 @@ func (s *State) IncrementUsage(ip string) {
 func (s *State) GetUsageToday(ip string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	if s.db != nil {
+		return dbGetUsageToday(s.db, ip)
+	}
 	today := dateKey(time.Now())
 	if s.data.Usage[ip] == nil {
 		return 0
@@ -115,6 +133,10 @@ func (s *State) GetUsageToday(ip string) int {
 func (s *State) SetOnline(ip string, online bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		_ = dbSetOnline(s.db, ip, online)
+		return
+	}
 	s.data.Online[ip] = online
 }
 
@@ -122,6 +144,9 @@ func (s *State) SetOnline(ip string, online bool) {
 func (s *State) IsOnline(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		return dbIsOnline(s.db, ip)
+	}
 	return s.data.Online[ip]
 }
 
@@ -129,6 +154,10 @@ func (s *State) IsOnline(ip string) bool {
 func (s *State) SetRouterBlocked(ip string, blocked bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		_ = dbSetRouterBlocked(s.db, ip, blocked)
+		return
+	}
 	s.data.RouterBlocked[ip] = blocked
 	s.saveLocked()
 }
@@ -137,6 +166,9 @@ func (s *State) SetRouterBlocked(ip string, blocked bool) {
 func (s *State) IsRouterBlocked(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		return dbIsRouterBlocked(s.db, ip)
+	}
 	return s.data.RouterBlocked[ip]
 }
 
@@ -144,7 +176,12 @@ func (s *State) IsRouterBlocked(ip string) bool {
 func (s *State) DisableFor(ip string, d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data.DisabledUntil[ip] = time.Now().Add(d)
+	until := time.Now().Add(d)
+	if s.db != nil {
+		_ = dbDisableFor(s.db, ip, until)
+		return
+	}
+	s.data.DisabledUntil[ip] = until
 	s.saveLocked()
 }
 
@@ -152,6 +189,9 @@ func (s *State) DisableFor(ip string, d time.Duration) {
 func (s *State) IsDisabled(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		return dbIsDisabled(s.db, ip)
+	}
 	until, ok := s.data.DisabledUntil[ip]
 	if !ok {
 		return false
@@ -163,6 +203,9 @@ func (s *State) IsDisabled(ip string) bool {
 func (s *State) GetDisabledUntil(ip string) time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		return dbGetDisabledUntil(s.db, ip)
+	}
 	return s.data.DisabledUntil[ip]
 }
 

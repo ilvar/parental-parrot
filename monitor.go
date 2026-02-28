@@ -67,7 +67,9 @@ func (m *Monitor) checkDevice(dev *Device) {
 	var online bool
 	switch dev.DetectMethod {
 	case "router_conntrack":
-		online = m.routerDetectOnline(dev)
+		// Only count usage when there's actual traffic (conntrack), not just "on network" (ARP).
+		// E.g. TV in sleep = no conntrack = no usage; TV streaming = conntrack entries = usage.
+		online = m.routerDetectActiveTraffic(dev)
 	default:
 		online = ping(dev.IP)
 	}
@@ -196,6 +198,35 @@ func (m *Monitor) routerTarget() SSHTarget {
 	}
 }
 
+// TestRouterConnection runs a no-op SSH command on the router. Returns nil on success.
+func (m *Monitor) TestRouterConnection() error {
+	if m.config.Router == nil || m.config.Router.IP == "" {
+		return fmt.Errorf("router not configured")
+	}
+	return sshRun(m.routerTarget(), "echo ok")
+}
+
+// TestDeviceConnection runs a no-op SSH command on the device with the given IP. Returns nil on success.
+func (m *Monitor) TestDeviceConnection(ip string) error {
+	var dev *Device
+	for i := range m.config.Devices {
+		if m.config.Devices[i].IP == ip {
+			dev = &m.config.Devices[i]
+			break
+		}
+	}
+	if dev == nil {
+		return fmt.Errorf("device %s not found", ip)
+	}
+	target := SSHTarget{
+		IP:       dev.IP,
+		User:     dev.SSHUser,
+		Password: dev.SSHPassword,
+		KeyPath:  dev.SSHKey,
+	}
+	return sshRun(target, "echo ok")
+}
+
 func (m *Monitor) routerBlock(dev *Device) {
 	if m.state.IsRouterBlocked(dev.IP) {
 		return // already blocked
@@ -244,6 +275,27 @@ func (m *Monitor) routerDetectOnline(dev *Device) bool {
 		}
 	}
 	return false
+}
+
+// routerDetectActiveTraffic checks if the device has at least TrafficThreshold active
+// connections in the router's conntrack table. Only then do we count usage.
+func (m *Monitor) routerDetectActiveTraffic(dev *Device) bool {
+	thresh := m.config.TrafficThreshold
+	if thresh < 1 {
+		thresh = 1
+	}
+	// Match src=IP (space) so we don't match a prefix; count matches
+	cmd := fmt.Sprintf("grep -cF 'src=%s ' /proc/net/nf_conntrack 2>/dev/null || echo 0", dev.IP)
+	output, err := sshRunOutput(m.routerTarget(), cmd)
+	if err != nil {
+		log.Printf("Failed to query router conntrack for %s: %v", dev.Name, err)
+		return false
+	}
+	var count int
+	if _, err := fmt.Sscanf(strings.TrimSpace(output), "%d", &count); err != nil {
+		return false
+	}
+	return count >= thresh
 }
 
 func ping(ip string) bool {

@@ -1,0 +1,10 @@
+.git
+*.db
+*.db-wal
+*.db-shm
+state.json
+dist/
+ParentalParrot
+config.yaml
+*.md
+!config.example.yaml

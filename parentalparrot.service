@@ -4,7 +4,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/ParentalParrot -config /etc/parentalparrot/config.yaml -state /var/lib/parentalparrot/state.json
+ExecStart=/usr/local/bin/ParentalParrot -db /var/lib/parentalparrot/parentalparrot.db -seed /etc/parentalparrot/config.example.yaml
 Restart=on-failure
 RestartSec=10
 WorkingDirectory=/var/lib/parentalparrot

@@ -1,0 +1,12 @@
+services:
+  parentalparrot:
+    build: .
+    container_name: parentalparrot
+    ports:
+      - "8080:8080"
+    volumes:
+      - parentalparrot-data:/data
+    restart: unless-stopped
+
+volumes:
+  parentalparrot-data:

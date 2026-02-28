@@ -6,4 +6,7 @@ config.yaml
 *.local.yaml
 
 state.json
+*.db
+*.db-wal
+*.db-shm
 dist/
