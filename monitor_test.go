@@ -136,7 +136,8 @@ func TestMonitor_BlockDispatch_DefaultSSHShutdown(t *testing.T) {
 		Devices: []Device{
 			{
 				Name:         "PC",
-				IP:           "10.0.0.1",
+				IP:           "127.0.0.1",
+				SSHPort:      "1",
 				SSHUser:      "user",
 				SSHPassword:  "pass",
 				OS:           "linux",
@@ -155,7 +156,7 @@ func TestMonitor_BlockDispatch_DefaultSSHShutdown(t *testing.T) {
 func TestMonitor_BlockDispatch_Router(t *testing.T) {
 	state := NewState(filepath.Join(t.TempDir(), "state.json"))
 	cfg := &Config{
-		Router: &Router{IP: "192.168.1.1", SSHUser: "root", SSHPassword: "pass"},
+		Router: &Router{IP: "127.0.0.1", SSHPort: "1", SSHUser: "root", SSHPassword: "pass"},
 		Devices: []Device{
 			{
 				Name:         "Phone",

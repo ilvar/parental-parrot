@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,14 +17,16 @@ import (
 // SSHTarget holds connection details for an SSH host.
 type SSHTarget struct {
 	IP       string
+	Port     string // optional; defaults to "22"
 	User     string
 	Password string
 	KeyPath  string
 }
 
 type Monitor struct {
-	config *Config
-	state  *State
+	config  *Config
+	state   *State
+	Verbose bool
 }
 
 func NewMonitor(config *Config, state *State) *Monitor {
@@ -70,16 +74,30 @@ func (m *Monitor) checkDevice(dev *Device) {
 		// Only count usage when there's actual traffic (conntrack), not just "on network" (ARP).
 		// E.g. TV in sleep = no conntrack = no usage; TV streaming = conntrack entries = usage.
 		online = m.routerDetectActiveTraffic(dev)
+	case "jellyfin":
+		online = m.jellyfinDetectPlaying(dev)
 	default:
 		online = ping(dev.IP)
 	}
+	wasOnline := m.state.IsOnline(dev.IP)
 	m.state.SetOnline(dev.IP, online)
+
+	if m.Verbose {
+		usage := m.state.GetUsageToday(dev.IP)
+		if online != wasOnline {
+			log.Printf("[tick] %s (%s): %s → %s [detect=%s, usage=%dm]", dev.Name, dev.IP, onOff(wasOnline), onOff(online), dev.DetectMethod, usage)
+		} else if online {
+			log.Printf("[tick] %s (%s): online [detect=%s, usage=%dm]", dev.Name, dev.IP, dev.DetectMethod, usage)
+		}
+	}
 
 	// Unblock logic for router-blocked devices
 	if dev.BlockMethod == "router" && m.state.IsRouterBlocked(dev.IP) {
 		if m.shouldUnblock(dev) {
 			log.Printf("Device %s (%s): unblocking on router", dev.Name, dev.IP)
 			m.RouterUnblock(dev)
+		} else if m.Verbose {
+			log.Printf("[tick] %s (%s): still router-blocked", dev.Name, dev.IP)
 		}
 	}
 
@@ -92,6 +110,9 @@ func (m *Monitor) checkDevice(dev *Device) {
 
 	// Check if blocking is disabled
 	if m.state.IsDisabled(dev.IP) {
+		if m.Verbose {
+			log.Printf("[tick] %s (%s): blocking disabled, skipping limit check", dev.Name, dev.IP)
+		}
 		return
 	}
 
@@ -178,6 +199,7 @@ func (m *Monitor) sshShutdown(dev *Device) {
 
 	target := SSHTarget{
 		IP:       dev.IP,
+		Port:     dev.SSHPort,
 		User:     dev.SSHUser,
 		Password: dev.SSHPassword,
 		KeyPath:  dev.SSHKey,
@@ -192,18 +214,140 @@ func (m *Monitor) routerTarget() SSHTarget {
 	r := m.config.Router
 	return SSHTarget{
 		IP:       r.IP,
+		Port:     r.SSHPort,
 		User:     r.SSHUser,
 		Password: r.SSHPassword,
 		KeyPath:  r.SSHKey,
 	}
 }
 
-// TestRouterConnection runs a no-op SSH command on the router. Returns nil on success.
-func (m *Monitor) TestRouterConnection() error {
+// CheckResult holds the result of a single router connectivity/config check.
+type CheckResult struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+	Fixed  bool   `json:"fixed,omitempty"`
+}
+
+// TestRouterConnection checks SSH connectivity and network config on the router.
+// When m.Verbose is true (-v flag), each check is logged to the server log.
+// It checks: SSH connection, br_netfilter module, bridge-nf-call-iptables, conntrack table.
+// Missing br_netfilter / bridge-nf-call-iptables are fixed automatically.
+func (m *Monitor) TestRouterConnection() ([]CheckResult, error) {
 	if m.config.Router == nil || m.config.Router.IP == "" {
-		return fmt.Errorf("router not configured")
+		return nil, fmt.Errorf("router not configured")
 	}
-	return sshRun(m.routerTarget(), "echo ok")
+
+	var checks []CheckResult
+	target := m.routerTarget()
+	anyFailed := false
+
+	logCheck := func(c CheckResult) {
+		if m.Verbose {
+			status := "OK"
+			if !c.OK {
+				status = "FAIL"
+			}
+			if c.Fixed {
+				status = "FIXED"
+			}
+			log.Printf("[router-test] %s: %s — %s", status, c.Name, c.Detail)
+		}
+	}
+
+	// 1. SSH connection
+	_, err := sshRunOutput(target, "echo ok")
+	if err != nil {
+		c := CheckResult{Name: "SSH connection", OK: false, Detail: err.Error()}
+		logCheck(c)
+		checks = append(checks, c)
+		return checks, fmt.Errorf("SSH connection failed: %v", err)
+	}
+	c := CheckResult{Name: "SSH connection", OK: true, Detail: "connected to " + m.config.Router.IP}
+	logCheck(c)
+	checks = append(checks, c)
+
+	// 2. br_netfilter module (needed for LAN-to-LAN conntrack)
+	out, _ := sshRunOutput(target, "lsmod 2>/dev/null | grep -q br_netfilter && echo loaded || echo missing")
+	if strings.TrimSpace(out) != "loaded" {
+		_, err := sshRunOutput(target, "modprobe br_netfilter 2>&1")
+		if err != nil {
+			// modprobe failed — try installing kmod-br-netfilter (OpenWRT)
+			c := CheckResult{Name: "br_netfilter module", OK: false, Detail: "modprobe failed, installing kmod-br-netfilter..."}
+			logCheck(c)
+			checks = append(checks, c)
+			_, err = sshRunOutput(target, "opkg update >/dev/null 2>&1 && opkg install kmod-br-netfilter 2>&1")
+			if err != nil {
+				c = CheckResult{Name: "kmod-br-netfilter install", OK: false, Detail: "opkg install failed: " + err.Error()}
+				logCheck(c)
+				checks = append(checks, c)
+				anyFailed = true
+			} else {
+				c = CheckResult{Name: "kmod-br-netfilter install", OK: true, Detail: "package installed", Fixed: true}
+				logCheck(c)
+				checks = append(checks, c)
+				// Now try modprobe again
+				_, err = sshRunOutput(target, "modprobe br_netfilter 2>&1")
+				if err != nil {
+					c = CheckResult{Name: "br_netfilter module", OK: false, Detail: "modprobe still failed after install: " + err.Error()}
+					logCheck(c)
+					checks = append(checks, c)
+					anyFailed = true
+				} else {
+					c = CheckResult{Name: "br_netfilter module", OK: true, Detail: "loaded after package install", Fixed: true}
+					logCheck(c)
+					checks = append(checks, c)
+				}
+			}
+		} else {
+			c := CheckResult{Name: "br_netfilter module", OK: true, Detail: "loaded (was missing, fixed)", Fixed: true}
+			logCheck(c)
+			checks = append(checks, c)
+		}
+	} else {
+		c := CheckResult{Name: "br_netfilter module", OK: true, Detail: "already loaded"}
+		logCheck(c)
+		checks = append(checks, c)
+	}
+
+	// 3. bridge-nf-call-iptables (makes bridged frames go through iptables/conntrack)
+	out, _ = sshRunOutput(target, "cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo missing")
+	val := strings.TrimSpace(out)
+	if val == "1" {
+		c := CheckResult{Name: "bridge-nf-call-iptables", OK: true, Detail: "enabled"}
+		logCheck(c)
+		checks = append(checks, c)
+	} else {
+		_, err := sshRunOutput(target, "echo 1 > /proc/sys/net/bridge/bridge-nf-call-iptables 2>&1")
+		if err != nil {
+			c := CheckResult{Name: "bridge-nf-call-iptables", OK: false, Detail: fmt.Sprintf("was %q; failed to enable: %v", val, err)}
+			logCheck(c)
+			checks = append(checks, c)
+			anyFailed = true
+		} else {
+			c := CheckResult{Name: "bridge-nf-call-iptables", OK: true, Detail: fmt.Sprintf("enabled (was %q, fixed)", val), Fixed: true}
+			logCheck(c)
+			checks = append(checks, c)
+		}
+	}
+
+	// 4. conntrack table accessible
+	out, _ = sshRunOutput(target, "test -f /proc/net/nf_conntrack && echo exists || echo missing")
+	if strings.TrimSpace(out) == "exists" {
+		c := CheckResult{Name: "conntrack table", OK: true, Detail: "/proc/net/nf_conntrack accessible"}
+		logCheck(c)
+		checks = append(checks, c)
+	} else {
+		c := CheckResult{Name: "conntrack table", OK: false, Detail: "/proc/net/nf_conntrack not found"}
+		logCheck(c)
+		checks = append(checks, c)
+		anyFailed = true
+	}
+
+	if anyFailed {
+		return checks, fmt.Errorf("some checks failed")
+	}
+	return checks, nil
 }
 
 // TestDeviceConnection runs a no-op SSH command on the device with the given IP. Returns nil on success.
@@ -220,6 +364,7 @@ func (m *Monitor) TestDeviceConnection(ip string) error {
 	}
 	target := SSHTarget{
 		IP:       dev.IP,
+		Port:     dev.SSHPort,
 		User:     dev.SSHUser,
 		Password: dev.SSHPassword,
 		KeyPath:  dev.SSHKey,
@@ -284,8 +429,9 @@ func (m *Monitor) routerDetectActiveTraffic(dev *Device) bool {
 	if thresh < 1 {
 		thresh = 1
 	}
-	// Match src=IP (space) so we don't match a prefix; count matches
-	cmd := fmt.Sprintf("grep -cF 'src=%s ' /proc/net/nf_conntrack 2>/dev/null || echo 0", dev.IP)
+	// Match src=IP or dst=IP so we catch both outgoing and incoming traffic
+	// (e.g. LAN streaming where the device is the destination, not the source)
+	cmd := fmt.Sprintf("grep -cE '(src|dst)=%s ' /proc/net/nf_conntrack 2>/dev/null || echo 0", dev.IP)
 	output, err := sshRunOutput(m.routerTarget(), cmd)
 	if err != nil {
 		log.Printf("Failed to query router conntrack for %s: %v", dev.Name, err)
@@ -295,7 +441,140 @@ func (m *Monitor) routerDetectActiveTraffic(dev *Device) bool {
 	if _, err := fmt.Sscanf(strings.TrimSpace(output), "%d", &count); err != nil {
 		return false
 	}
+	if m.Verbose {
+		log.Printf("[conntrack] %s (%s): %d entries (threshold=%d, active=%v)", dev.Name, dev.IP, count, thresh, count >= thresh)
+	}
 	return count >= thresh
+}
+
+// jellyfinDetectPlaying checks if the device has an active playback session on Jellyfin.
+func (m *Monitor) jellyfinDetectPlaying(dev *Device) bool {
+	if m.config.Jellyfin == nil || m.config.Jellyfin.URL == "" {
+		return false
+	}
+	jf := m.config.Jellyfin
+	url := strings.TrimRight(jf.URL, "/") + "/Sessions?activeWithinSeconds=60"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("Jellyfin request error for %s: %v", dev.Name, err)
+		return false
+	}
+	req.Header.Set("Authorization", fmt.Sprintf(`MediaBrowser Token="%s"`, jf.APIKey))
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Jellyfin HTTP error for %s: %v", dev.Name, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Jellyfin returned status %d for %s", resp.StatusCode, dev.Name)
+		return false
+	}
+
+	var sessions []struct {
+		RemoteEndPoint string `json:"RemoteEndPoint"`
+		NowPlayingItem *struct {
+			Name string `json:"Name"`
+		} `json:"NowPlayingItem"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&sessions); err != nil {
+		log.Printf("Jellyfin JSON decode error for %s: %v", dev.Name, err)
+		return false
+	}
+
+	for _, s := range sessions {
+		if s.NowPlayingItem != nil {
+			if m.Verbose {
+				log.Printf("[jellyfin] %s: playing %q (endpoint=%s)", dev.Name, s.NowPlayingItem.Name, s.RemoteEndPoint)
+			}
+			return true
+		}
+	}
+	if m.Verbose {
+		log.Printf("[jellyfin] %s: %d sessions, none playing", dev.Name, len(sessions))
+	}
+	return false
+}
+
+// TestJellyfinConnection checks Jellyfin connectivity and authentication.
+func (m *Monitor) TestJellyfinConnection() ([]CheckResult, error) {
+	if m.config.Jellyfin == nil || m.config.Jellyfin.URL == "" {
+		return nil, fmt.Errorf("jellyfin not configured")
+	}
+
+	var checks []CheckResult
+	jf := m.config.Jellyfin
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	logCheck := func(c CheckResult) {
+		if m.Verbose {
+			status := "OK"
+			if !c.OK {
+				status = "FAIL"
+			}
+			log.Printf("[jellyfin-test] %s: %s — %s", status, c.Name, c.Detail)
+		}
+	}
+
+	// 1. HTTP connectivity (unauthenticated endpoint)
+	url1 := strings.TrimRight(jf.URL, "/") + "/System/Info/Public"
+	resp, err := client.Get(url1)
+	if err != nil {
+		c := CheckResult{Name: "HTTP connectivity", OK: false, Detail: err.Error()}
+		logCheck(c)
+		checks = append(checks, c)
+		return checks, fmt.Errorf("HTTP connectivity failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c := CheckResult{Name: "HTTP connectivity", OK: false, Detail: fmt.Sprintf("status %d", resp.StatusCode)}
+		logCheck(c)
+		checks = append(checks, c)
+		return checks, fmt.Errorf("HTTP connectivity failed: status %d", resp.StatusCode)
+	}
+	c := CheckResult{Name: "HTTP connectivity", OK: true, Detail: "connected to " + jf.URL}
+	logCheck(c)
+	checks = append(checks, c)
+
+	// 2. Auth check (authenticated endpoint)
+	url2 := strings.TrimRight(jf.URL, "/") + "/Sessions?activeWithinSeconds=60"
+	req, err := http.NewRequest("GET", url2, nil)
+	if err != nil {
+		c := CheckResult{Name: "API authentication", OK: false, Detail: err.Error()}
+		logCheck(c)
+		checks = append(checks, c)
+		return checks, fmt.Errorf("auth check failed: %v", err)
+	}
+	req.Header.Set("Authorization", fmt.Sprintf(`MediaBrowser Token="%s"`, jf.APIKey))
+	resp, err = client.Do(req)
+	if err != nil {
+		c := CheckResult{Name: "API authentication", OK: false, Detail: err.Error()}
+		logCheck(c)
+		checks = append(checks, c)
+		return checks, fmt.Errorf("auth check failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c := CheckResult{Name: "API authentication", OK: false, Detail: fmt.Sprintf("status %d (check API key)", resp.StatusCode)}
+		logCheck(c)
+		checks = append(checks, c)
+		return checks, fmt.Errorf("auth check failed: status %d", resp.StatusCode)
+	}
+	c = CheckResult{Name: "API authentication", OK: true, Detail: "API key valid"}
+	logCheck(c)
+	checks = append(checks, c)
+
+	return checks, nil
+}
+
+func onOff(b bool) string {
+	if b {
+		return "online"
+	}
+	return "offline"
 }
 
 func ping(ip string) bool {
@@ -329,7 +608,11 @@ func sshRunOutput(target SSHTarget, command string) (string, error) {
 		Timeout:         10 * time.Second,
 	}
 
-	addr := net.JoinHostPort(target.IP, "22")
+	port := target.Port
+	if port == "" {
+		port = "22"
+	}
+	addr := net.JoinHostPort(target.IP, port)
 	client, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
 		return "", fmt.Errorf("ssh dial: %w", err)

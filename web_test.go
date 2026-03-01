@@ -298,7 +298,7 @@ func TestWeb_DisableUnblocksRouterDevice(t *testing.T) {
 	state := NewState(filepath.Join(t.TempDir(), "state.json"))
 	cfg := &Config{
 		UIPassword: "testpass",
-		Router:     &Router{IP: "192.168.1.1", SSHUser: "root", SSHPassword: "pass"},
+		Router:     &Router{IP: "127.0.0.1", SSHPort: "1", SSHUser: "root", SSHPassword: "pass"},
 		Devices: []Device{
 			{
 				Name:         "Phone",

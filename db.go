@@ -43,14 +43,21 @@ func InitSchema(db *sql.DB) error {
 	CREATE TABLE IF NOT EXISTS router (
 		id INTEGER PRIMARY KEY CHECK (id = 1),
 		ip TEXT NOT NULL DEFAULT '',
+		ssh_port TEXT NOT NULL DEFAULT '',
 		ssh_user TEXT NOT NULL DEFAULT '',
 		ssh_password TEXT NOT NULL DEFAULT '',
 		ssh_key TEXT NOT NULL DEFAULT ''
+	);
+	CREATE TABLE IF NOT EXISTS jellyfin (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		url TEXT NOT NULL DEFAULT '',
+		api_key TEXT NOT NULL DEFAULT ''
 	);
 	CREATE TABLE IF NOT EXISTS devices (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL,
 		ip TEXT NOT NULL UNIQUE,
+		ssh_port TEXT NOT NULL DEFAULT '',
 		ssh_user TEXT NOT NULL DEFAULT '',
 		ssh_password TEXT NOT NULL DEFAULT '',
 		ssh_key TEXT NOT NULL DEFAULT '',
@@ -85,9 +92,11 @@ func InitSchema(db *sql.DB) error {
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
-	// Migrations: add columns to config (ignore if column already exists)
+	// Migrations: add columns (ignore if column already exists)
 	_, _ = db.Exec("ALTER TABLE config ADD COLUMN default_router_block INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE config ADD COLUMN traffic_threshold INTEGER DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE router ADD COLUMN ssh_port TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE devices ADD COLUMN ssh_port TEXT NOT NULL DEFAULT ''")
 	return nil
 }
 
@@ -192,14 +201,21 @@ func LoadConfigFromDB(db *sql.DB) (*Config, error) {
 	}
 
 	// router
-	var rip, ruser, rpass, rkey string
-	err = db.QueryRow("SELECT ip, ssh_user, ssh_password, ssh_key FROM router WHERE id = 1").Scan(&rip, &ruser, &rpass, &rkey)
+	var rip, rport, ruser, rpass, rkey string
+	err = db.QueryRow("SELECT ip, ssh_port, ssh_user, ssh_password, ssh_key FROM router WHERE id = 1").Scan(&rip, &rport, &ruser, &rpass, &rkey)
 	if err == nil && rip != "" {
-		cfg.Router = &Router{IP: rip, SSHUser: ruser, SSHPassword: rpass, SSHKey: rkey}
+		cfg.Router = &Router{IP: rip, SSHPort: rport, SSHUser: ruser, SSHPassword: rpass, SSHKey: rkey}
+	}
+
+	// jellyfin
+	var jurl, jkey string
+	err = db.QueryRow("SELECT url, api_key FROM jellyfin WHERE id = 1").Scan(&jurl, &jkey)
+	if err == nil && jurl != "" {
+		cfg.Jellyfin = &Jellyfin{URL: jurl, APIKey: jkey}
 	}
 
 	// devices
-	rows, err := db.Query(`SELECT name, ip, ssh_user, ssh_password, ssh_key, os, mac, block_method, detect_method,
+	rows, err := db.Query(`SELECT name, ip, ssh_port, ssh_user, ssh_password, ssh_key, os, mac, block_method, detect_method,
 		sched_all, sched_weekday, sched_weekend, sched_monday, sched_tuesday, sched_wednesday, sched_thursday,
 		sched_friday, sched_saturday, sched_sunday, allowed_start, allowed_end FROM devices ORDER BY id`)
 	if err != nil {
@@ -211,7 +227,7 @@ func LoadConfigFromDB(db *sql.DB) (*Config, error) {
 		var os, mac, bm, dm string
 		var sa, swd, swe, smon, stue, swed, sthu, sfri, ssat, ssun sql.NullInt64
 		var as, ae sql.NullString
-		err := rows.Scan(&d.Name, &d.IP, &d.SSHUser, &d.SSHPassword, &d.SSHKey, &os, &mac, &bm, &dm,
+		err := rows.Scan(&d.Name, &d.IP, &d.SSHPort, &d.SSHUser, &d.SSHPassword, &d.SSHKey, &os, &mac, &bm, &dm,
 			&sa, &swd, &swe, &smon, &stue, &swed, &sthu, &sfri, &ssat, &ssun, &as, &ae)
 		if err != nil {
 			return nil, fmt.Errorf("device row: %w", err)
@@ -359,10 +375,21 @@ func SaveConfigToDB(db *sql.DB, cfg *Config) error {
 
 	// router
 	if cfg.Router != nil {
-		_, err = tx.Exec("INSERT OR REPLACE INTO router (id, ip, ssh_user, ssh_password, ssh_key) VALUES (1, ?, ?, ?, ?)",
-			cfg.Router.IP, cfg.Router.SSHUser, cfg.Router.SSHPassword, cfg.Router.SSHKey)
+		_, err = tx.Exec("INSERT OR REPLACE INTO router (id, ip, ssh_port, ssh_user, ssh_password, ssh_key) VALUES (1, ?, ?, ?, ?, ?)",
+			cfg.Router.IP, cfg.Router.SSHPort, cfg.Router.SSHUser, cfg.Router.SSHPassword, cfg.Router.SSHKey)
 	} else {
-		_, err = tx.Exec("INSERT OR REPLACE INTO router (id, ip, ssh_user, ssh_password, ssh_key) VALUES (1, '', '', '', '')")
+		_, err = tx.Exec("INSERT OR REPLACE INTO router (id, ip, ssh_port, ssh_user, ssh_password, ssh_key) VALUES (1, '', '', '', '', '')")
+	}
+	if err != nil {
+		return err
+	}
+
+	// jellyfin
+	if cfg.Jellyfin != nil {
+		_, err = tx.Exec("INSERT OR REPLACE INTO jellyfin (id, url, api_key) VALUES (1, ?, ?)",
+			cfg.Jellyfin.URL, cfg.Jellyfin.APIKey)
+	} else {
+		_, err = tx.Exec("INSERT OR REPLACE INTO jellyfin (id, url, api_key) VALUES (1, '', '')")
 	}
 	if err != nil {
 		return err
@@ -375,11 +402,11 @@ func SaveConfigToDB(db *sql.DB, cfg *Config) error {
 	}
 	for _, d := range cfg.Devices {
 		all, wd, we, mon, tue, wed, thu, fri, sat, sun, allowStart, allowEnd := scheduleToNulls(&d.Schedule)
-		_, err = tx.Exec(`INSERT INTO devices (name, ip, ssh_user, ssh_password, ssh_key, os, mac, block_method, detect_method,
+		_, err = tx.Exec(`INSERT INTO devices (name, ip, ssh_port, ssh_user, ssh_password, ssh_key, os, mac, block_method, detect_method,
 			sched_all, sched_weekday, sched_weekend, sched_monday, sched_tuesday, sched_wednesday, sched_thursday,
 			sched_friday, sched_saturday, sched_sunday, allowed_start, allowed_end)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			d.Name, d.IP, d.SSHUser, d.SSHPassword, d.SSHKey, d.OS, d.MAC, d.BlockMethod, d.DetectMethod,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			d.Name, d.IP, d.SSHPort, d.SSHUser, d.SSHPassword, d.SSHKey, d.OS, d.MAC, d.BlockMethod, d.DetectMethod,
 			all, wd, we, mon, tue, wed, thu, fri, sat, sun, allowStart, allowEnd)
 		if err != nil {
 			return err
@@ -398,7 +425,7 @@ func ReloadConfigFromDB(db *sql.DB, cfg *Config) error {
 	return nil
 }
 
-func ValidateDevice(d *Device, hasRouter bool) error {
+func ValidateDevice(d *Device, hasRouter, hasJellyfin bool) error {
 	d.OS = strings.ToLower(d.OS)
 	if d.OS == "" {
 		d.OS = "linux"
@@ -423,11 +450,14 @@ func ValidateDevice(d *Device, hasRouter bool) error {
 	if d.DetectMethod == "" {
 		d.DetectMethod = "ping"
 	}
-	if d.DetectMethod != "ping" && d.DetectMethod != "router_conntrack" {
+	if d.DetectMethod != "ping" && d.DetectMethod != "router_conntrack" && d.DetectMethod != "jellyfin" {
 		return fmt.Errorf("device %q: unsupported detect_method %q", d.Name, d.DetectMethod)
 	}
 	if d.DetectMethod == "router_conntrack" && !hasRouter {
 		return fmt.Errorf("device %q: router section must be configured when detect_method is router_conntrack", d.Name)
+	}
+	if d.DetectMethod == "jellyfin" && !hasJellyfin {
+		return fmt.Errorf("device %q: jellyfin section must be configured when detect_method is jellyfin", d.Name)
 	}
 	return nil
 }

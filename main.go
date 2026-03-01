@@ -24,6 +24,7 @@ func main() {
 	seedYAML := flag.String("seed", "config.example.yaml", "path to example YAML to seed DB when empty")
 	listen := flag.String("listen", ":8080", "web UI listen address")
 	resetPassword := flag.String("reset-password", "", "if set, update UI password in DB and exit (e.g. -reset-password=newpass)")
+	verbose := flag.Bool("v", false, "verbose logging (router test checks, etc.)")
 	flag.Parse()
 
 	if *resetPassword != "" {
@@ -72,6 +73,7 @@ func main() {
 
 	// Start monitor
 	monitor := NewMonitor(cfg, state)
+	monitor.Verbose = *verbose
 	stopMonitor := make(chan struct{})
 	go monitor.Run(stopMonitor)
 	log.Println("Monitor started (checking every 60s)")

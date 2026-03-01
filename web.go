@@ -7,13 +7,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"database/sql"
+
+	"gopkg.in/yaml.v3"
 )
 
 type WebServer struct {
@@ -34,7 +38,10 @@ func (ws *WebServer) Handler() http.Handler {
 	mux.HandleFunc("/dashboard", ws.handleDashboard)
 	mux.HandleFunc("/disable/", ws.handleDisable)
 	mux.HandleFunc("/settings", ws.handleSettings)
+	mux.HandleFunc("/settings/export", ws.handleExport)
+	mux.HandleFunc("/settings/import", ws.handleImport)
 	mux.HandleFunc("/settings/test-router", ws.handleTestRouter)
+	mux.HandleFunc("/settings/test-jellyfin", ws.handleTestJellyfin)
 	mux.HandleFunc("/settings/test-device/", ws.handleTestDevice)
 	mux.HandleFunc("/logout", ws.handleLogout)
 	return mux
@@ -289,7 +296,88 @@ func (ws *WebServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if saved {
 		data["Message"] = "Settings saved."
 	}
+	if importErr := r.URL.Query().Get("importerr"); importErr != "" {
+		data["ImportError"] = importErr
+	}
 	renderTemplate(w, settingsTmpl, data)
+}
+
+func (ws *WebServer) handleExport(w http.ResponseWriter, r *http.Request) {
+	if !ws.isAuthenticated(r) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if ws.db == nil {
+		http.Error(w, "Export only available when using database", http.StatusServiceUnavailable)
+		return
+	}
+	cfg, err := LoadConfigFromDB(ws.db)
+	if err != nil {
+		http.Error(w, "Failed to load config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		http.Error(w, "Failed to marshal config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-yaml")
+	w.Header().Set("Content-Disposition", `attachment; filename="parrot-config.yaml"`)
+	w.Write(data)
+}
+
+func (ws *WebServer) handleImport(w http.ResponseWriter, r *http.Request) {
+	if !ws.isAuthenticated(r) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if ws.db == nil {
+		http.Error(w, "Import only available when using database", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		http.Redirect(w, r, "/settings?importerr="+url.QueryEscape("Failed to parse upload: "+err.Error()), http.StatusSeeOther)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Redirect(w, r, "/settings?importerr="+url.QueryEscape("No file uploaded"), http.StatusSeeOther)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		http.Redirect(w, r, "/settings?importerr="+url.QueryEscape("Failed to read file: "+err.Error()), http.StatusSeeOther)
+		return
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		http.Redirect(w, r, "/settings?importerr="+url.QueryEscape("Invalid YAML: "+err.Error()), http.StatusSeeOther)
+		return
+	}
+	hasRouter := cfg.Router != nil && cfg.Router.IP != ""
+	hasJellyfin := cfg.Jellyfin != nil && cfg.Jellyfin.URL != ""
+	for i := range cfg.Devices {
+		if err := ValidateDevice(&cfg.Devices[i], hasRouter, hasJellyfin); err != nil {
+			http.Redirect(w, r, "/settings?importerr="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+	}
+	if cfg.UIPassword == "" {
+		cfg.UIPassword = ws.config.UIPassword
+	}
+	if err := SaveConfigToDB(ws.db, &cfg); err != nil {
+		http.Redirect(w, r, "/settings?importerr="+url.QueryEscape("Failed to save: "+err.Error()), http.StatusSeeOther)
+		return
+	}
+	if err := ReloadConfigFromDB(ws.db, ws.config); err != nil {
+		log.Printf("Reload config after import: %v", err)
+	}
+	http.Redirect(w, r, "/settings?saved=1", http.StatusSeeOther)
 }
 
 func (ws *WebServer) parseSettingsForm(r *http.Request) *Config {
@@ -340,9 +428,19 @@ func (ws *WebServer) parseSettingsForm(r *http.Request) *Config {
 	if rip != "" {
 		cfg.Router = &Router{
 			IP:          rip,
+			SSHPort:     strings.TrimSpace(r.FormValue("router_ssh_port")),
 			SSHUser:     strings.TrimSpace(r.FormValue("router_ssh_user")),
 			SSHPassword: strings.TrimSpace(r.FormValue("router_ssh_password")),
 			SSHKey:      strings.TrimSpace(r.FormValue("router_ssh_key")),
+		}
+	}
+
+	// Jellyfin
+	jurl := strings.TrimSpace(r.FormValue("jellyfin_url"))
+	if jurl != "" {
+		cfg.Jellyfin = &Jellyfin{
+			URL:    jurl,
+			APIKey: strings.TrimSpace(r.FormValue("jellyfin_api_key")),
 		}
 	}
 
@@ -361,6 +459,7 @@ func (ws *WebServer) parseSettingsForm(r *http.Request) *Config {
 		d := Device{
 			Name:         name,
 			IP:           ip,
+			SSHPort:      strings.TrimSpace(getFormIndex(r.Form["device_ssh_port"], i)),
 			SSHUser:      strings.TrimSpace(getFormIndex(r.Form["device_ssh_user"], i)),
 			SSHPassword:  strings.TrimSpace(getFormIndex(r.Form["device_ssh_password"], i)),
 			SSHKey:       strings.TrimSpace(getFormIndex(r.Form["device_ssh_key"], i)),
@@ -403,8 +502,9 @@ func getFormIndex(sl []string, i int) string {
 
 func (ws *WebServer) saveSettings(cfg *Config) error {
 	hasRouter := cfg.Router != nil && cfg.Router.IP != ""
+	hasJellyfin := cfg.Jellyfin != nil && cfg.Jellyfin.URL != ""
 	for i := range cfg.Devices {
-		if err := ValidateDevice(&cfg.Devices[i], hasRouter); err != nil {
+		if err := ValidateDevice(&cfg.Devices[i], hasRouter, hasJellyfin); err != nil {
 			return err
 		}
 	}
@@ -434,8 +534,14 @@ func (ws *WebServer) handleTestRouter(w http.ResponseWriter, r *http.Request) {
 		ws.writeTestResult(w, fmt.Errorf("monitor not available"))
 		return
 	}
-	err := ws.monitor.TestRouterConnection()
-	ws.writeTestResult(w, err)
+	checks, err := ws.monitor.TestRouterConnection()
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "checks": checks})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "checks": checks})
 }
 
 func (ws *WebServer) handleTestDevice(w http.ResponseWriter, r *http.Request) {
@@ -458,6 +564,29 @@ func (ws *WebServer) handleTestDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	err := ws.monitor.TestDeviceConnection(ip)
 	ws.writeTestResult(w, err)
+}
+
+func (ws *WebServer) handleTestJellyfin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !ws.isAuthenticated(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if ws.monitor == nil {
+		ws.writeTestResult(w, fmt.Errorf("monitor not available"))
+		return
+	}
+	checks, err := ws.monitor.TestJellyfinConnection()
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "checks": checks})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "checks": checks})
 }
 
 func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -673,6 +802,8 @@ const settingsTmpl = `<!DOCTYPE html>
         .devices-table tr.device-row-1 td input.num { width: 55px; }
         .devices-table tr.block-router .ssh-creds-cell { display: none; }
         .devices-table tr.block-ssh .mac-cell { display: none; }
+        .devices-table tr.detect-jellyfin .mac-cell { display: none; }
+        .devices-table tr.detect-jellyfin .ssh-creds-cell { display: none; }
         .devices-table .field-label { display: block; font-size: 0.75rem; color: #666; margin-bottom: 0.2rem; }
     </style>
 </head>
@@ -682,6 +813,7 @@ const settingsTmpl = `<!DOCTYPE html>
         <span class="nav"><a href="/dashboard">Dashboard</a> | <a href="/settings">Settings</a> | <a href="/logout">Logout</a></span>
     </div>
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+    {{if .ImportError}}<div class="error">Import error: {{.ImportError}}</div>{{end}}
     {{if .Message}}<div class="message">{{.Message}}</div>{{end}}
 
     <form method="POST" action="/settings">
@@ -732,6 +864,10 @@ const settingsTmpl = `<!DOCTYPE html>
                 <input type="text" name="router_ip" class="medium" placeholder="192.168.1.1" value="{{if .Config.Router}}{{.Config.Router.IP}}{{end}}">
             </div>
             <div class="form-row">
+                <label>SSH port</label>
+                <input type="text" name="router_ssh_port" class="short" placeholder="22" value="{{if .Config.Router}}{{.Config.Router.SSHPort}}{{end}}">
+            </div>
+            <div class="form-row">
                 <label>SSH user</label>
                 <input type="text" name="router_ssh_user" class="medium" value="{{if .Config.Router}}{{.Config.Router.SSHUser}}{{end}}">
             </div>
@@ -743,9 +879,24 @@ const settingsTmpl = `<!DOCTYPE html>
                 <label>SSH key path</label>
                 <input type="text" name="router_ssh_key" class="long" placeholder="/home/you/.ssh/id_ed25519" value="{{if .Config.Router}}{{.Config.Router.SSHKey}}{{end}}">
             </div>
-            <p style="margin-top:0.5rem;font-size:0.85rem;color:#666">Save settings first, then test connection to the router (uses saved credentials).</p>
+            <p style="margin-top:0.5rem;font-size:0.85rem;color:#666">Save settings first, then test connection to the router (uses saved credentials). Checks SSH, br_netfilter, bridge-nf-call-iptables, and conntrack. Missing settings are fixed automatically.</p>
             <button type="button" class="btn btn-secondary" id="test-router-btn" style="margin-top:0.5rem">Test router connection</button>
-            <span id="test-router-result" style="margin-left:0.5rem;font-size:0.9rem"></span>
+            <div id="test-router-result" style="margin-top:0.5rem;font-size:0.85rem"></div>
+        </section>
+
+        <section>
+            <h2>Jellyfin (for detect_method=jellyfin)</h2>
+            <div class="form-row">
+                <label>URL</label>
+                <input type="text" name="jellyfin_url" class="long" placeholder="http://192.168.1.50:8096" value="{{if .Config.Jellyfin}}{{.Config.Jellyfin.URL}}{{end}}">
+            </div>
+            <div class="form-row">
+                <label>API Key</label>
+                <input type="text" name="jellyfin_api_key" class="long" placeholder="(from Jellyfin Dashboard > API Keys)" value="{{if .Config.Jellyfin}}{{.Config.Jellyfin.APIKey}}{{end}}">
+            </div>
+            <p style="margin-top:0.5rem;font-size:0.85rem;color:#666">Save settings first, then test connection. Checks HTTP connectivity and API key authentication.</p>
+            <button type="button" class="btn btn-secondary" id="test-jellyfin-btn" style="margin-top:0.5rem">Test Jellyfin connection</button>
+            <div id="test-jellyfin-result" style="margin-top:0.5rem;font-size:0.85rem"></div>
         </section>
 
         <section>
@@ -753,18 +904,19 @@ const settingsTmpl = `<!DOCTYPE html>
             <table class="devices-table">
                 <tbody id="devices-tbody">
                     {{range .Config.Devices}}
-                    <tr class="device-row-1 {{if eq .BlockMethod "router"}}block-router{{else}}block-ssh{{end}}" data-device-ip="{{.IP}}">
+                    <tr class="device-row-1 {{if eq .BlockMethod "router"}}block-router{{else}}block-ssh{{end}} {{if eq .DetectMethod "jellyfin"}}detect-jellyfin{{end}}" data-device-ip="{{.IP}}">
                         <td><label class="field-label">Name</label><input type="text" name="device_name" value="{{.Name}}" placeholder="Name"></td>
                         <td><label class="field-label">Block</label><select name="device_block_method"><option value="ssh_shutdown" {{if eq .BlockMethod "ssh_shutdown"}}selected{{end}}>ssh</option><option value="router" {{if eq .BlockMethod "router"}}selected{{end}}>router</option></select></td>
-                        <td><label class="field-label">Detect</label><select name="device_detect_method"><option value="ping" {{if eq .DetectMethod "ping"}}selected{{end}}>ping</option><option value="router_conntrack" {{if eq .DetectMethod "router_conntrack"}}selected{{end}}>conntrack</option></select></td>
+                        <td><label class="field-label">Detect</label><select name="device_detect_method"><option value="ping" {{if eq .DetectMethod "ping"}}selected{{end}}>ping</option><option value="router_conntrack" {{if eq .DetectMethod "router_conntrack"}}selected{{end}}>conntrack</option><option value="jellyfin" {{if eq .DetectMethod "jellyfin"}}selected{{end}}>jellyfin</option></select></td>
                         <td><label class="field-label">Limit (min)</label><input type="number" name="device_sched_all" class="num" min="0" placeholder="" value="{{if .Schedule.All}}{{.Schedule.All}}{{end}}"></td>
                         <td><label class="field-label">Hours</label><input type="text" name="device_allowed_start" placeholder="08:00" value="{{if .Schedule.AllowedHours}}{{.Schedule.AllowedHours.Start}}{{end}}" style="width:55px"> – <input type="text" name="device_allowed_end" placeholder="21:00" value="{{if .Schedule.AllowedHours}}{{.Schedule.AllowedHours.End}}{{end}}" style="width:55px"></td>
                         <td><label class="field-label">&nbsp;</label><button type="button" class="btn btn-danger" onclick="removeDevice(this)">Remove</button></td>
                         <td></td>
                     </tr>
-                    <tr class="device-row-2 {{if eq .BlockMethod "router"}}block-router{{else}}block-ssh{{end}}" data-device-ip="{{.IP}}">
+                    <tr class="device-row-2 {{if eq .BlockMethod "router"}}block-router{{else}}block-ssh{{end}} {{if eq .DetectMethod "jellyfin"}}detect-jellyfin{{end}}" data-device-ip="{{.IP}}">
                         <td><label class="field-label">IP</label><input type="text" name="device_ip" value="{{.IP}}" placeholder="192.168.1.100"></td>
                         <td class="mac-cell"><label class="field-label">MAC</label><input type="text" name="device_mac" value="{{.MAC}}" placeholder="AA:BB:CC:DD:EE:FF"></td>
+                        <td class="ssh-creds-cell"><label class="field-label">SSH port</label><input type="text" name="device_ssh_port" value="{{.SSHPort}}" placeholder="22" style="width:50px"></td>
                         <td class="ssh-creds-cell"><label class="field-label">SSH user</label><input type="text" name="device_ssh_user" value="{{.SSHUser}}" placeholder="admin"></td>
                         <td class="ssh-creds-cell"><label class="field-label">SSH pass</label><input type="password" name="device_ssh_password" value="{{.SSHPassword}}" placeholder=""></td>
                         <td class="ssh-creds-cell"><label class="field-label">SSH key</label><input type="text" name="device_ssh_key" value="{{.SSHKey}}" placeholder=""></td>
@@ -775,7 +927,7 @@ const settingsTmpl = `<!DOCTYPE html>
                     <tr class="new-row device-row-1 {{if .Config.DefaultRouterBlock}}block-router{{else}}block-ssh{{end}}">
                         <td><label class="field-label">Name</label><input type="text" name="device_name" placeholder="Name"></td>
                         <td><label class="field-label">Block</label><select name="device_block_method"><option value="ssh_shutdown" {{if not .Config.DefaultRouterBlock}}selected{{end}}>ssh</option><option value="router" {{if .Config.DefaultRouterBlock}}selected{{end}}>router</option></select></td>
-                        <td><label class="field-label">Detect</label><select name="device_detect_method"><option value="ping" {{if not .Config.DefaultRouterBlock}}selected{{end}}>ping</option><option value="router_conntrack" {{if .Config.DefaultRouterBlock}}selected{{end}}>conntrack</option></select></td>
+                        <td><label class="field-label">Detect</label><select name="device_detect_method"><option value="ping" {{if not .Config.DefaultRouterBlock}}selected{{end}}>ping</option><option value="router_conntrack" {{if .Config.DefaultRouterBlock}}selected{{end}}>conntrack</option><option value="jellyfin">jellyfin</option></select></td>
                         <td><label class="field-label">Limit (min)</label><input type="number" name="device_sched_all" class="num" min="0" placeholder=""></td>
                         <td><label class="field-label">Hours</label><input type="text" name="device_allowed_start" placeholder="08:00" style="width:55px"> – <input type="text" name="device_allowed_end" placeholder="21:00" style="width:55px"></td>
                         <td></td>
@@ -784,6 +936,7 @@ const settingsTmpl = `<!DOCTYPE html>
                     <tr class="new-row device-row-2 {{if .Config.DefaultRouterBlock}}block-router{{else}}block-ssh{{end}}">
                         <td><label class="field-label">IP</label><input type="text" name="device_ip" placeholder="192.168.1.100"></td>
                         <td class="mac-cell"><label class="field-label">MAC</label><input type="text" name="device_mac" placeholder="AA:BB:CC:DD:EE:FF"></td>
+                        <td class="ssh-creds-cell"><label class="field-label">SSH port</label><input type="text" name="device_ssh_port" placeholder="22" style="width:50px"></td>
                         <td class="ssh-creds-cell"><label class="field-label">SSH user</label><input type="text" name="device_ssh_user" placeholder="admin"></td>
                         <td class="ssh-creds-cell"><label class="field-label">SSH pass</label><input type="password" name="device_ssh_password" placeholder=""></td>
                         <td class="ssh-creds-cell"><label class="field-label">SSH key</label><input type="text" name="device_ssh_key" placeholder=""></td>
@@ -801,17 +954,38 @@ const settingsTmpl = `<!DOCTYPE html>
         </div>
     </form>
 
+    <section>
+        <h2>Import / Export</h2>
+        <p style="margin-bottom:0.75rem;font-size:0.9rem;color:#555">Export your current configuration as a YAML file, or import a previously exported one.</p>
+        <div style="display:flex;gap:1rem;align-items:flex-start;flex-wrap:wrap">
+            <a href="/settings/export" class="btn btn-secondary">Export config</a>
+            <form method="POST" action="/settings/import" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+                <input type="file" name="file" accept=".yaml,.yml" required>
+                <button type="submit" class="btn">Import config</button>
+            </form>
+        </div>
+    </section>
+
     <script>
     document.getElementById('devices-tbody').addEventListener('change', function(ev) {
-        if (ev.target.name !== 'device_block_method') return;
-        var row1 = ev.target.closest('tr');
-        var row2 = row1 && row1.nextElementSibling;
-        if (!row2 || !row2.classList.contains('device-row-2')) return;
-        var isRouter = ev.target.value === 'router';
-        row1.classList.remove('block-router', 'block-ssh');
-        row1.classList.add(isRouter ? 'block-router' : 'block-ssh');
-        row2.classList.remove('block-router', 'block-ssh');
-        row2.classList.add(isRouter ? 'block-router' : 'block-ssh');
+        if (ev.target.name === 'device_block_method') {
+            var row1 = ev.target.closest('tr');
+            var row2 = row1 && row1.nextElementSibling;
+            if (!row2 || !row2.classList.contains('device-row-2')) return;
+            var isRouter = ev.target.value === 'router';
+            row1.classList.remove('block-router', 'block-ssh');
+            row1.classList.add(isRouter ? 'block-router' : 'block-ssh');
+            row2.classList.remove('block-router', 'block-ssh');
+            row2.classList.add(isRouter ? 'block-router' : 'block-ssh');
+        }
+        if (ev.target.name === 'device_detect_method') {
+            var row1 = ev.target.closest('tr');
+            var row2 = row1 && row1.nextElementSibling;
+            if (!row2 || !row2.classList.contains('device-row-2')) return;
+            var isJellyfin = ev.target.value === 'jellyfin';
+            row1.classList.toggle('detect-jellyfin', isJellyfin);
+            row2.classList.toggle('detect-jellyfin', isJellyfin);
+        }
     });
     function addRow() {
         var tbody = document.getElementById('devices-tbody');
@@ -838,23 +1012,63 @@ const settingsTmpl = `<!DOCTYPE html>
     document.getElementById('test-router-btn').addEventListener('click', function() {
         var btn = this;
         var result = document.getElementById('test-router-result');
+        var url = '/settings/test-router';
         btn.disabled = true;
-        result.textContent = 'Testing…';
-        result.style.color = '';
-        fetch('/settings/test-router', { method: 'POST', credentials: 'same-origin' })
+        result.innerHTML = '<span style="color:#666">Testing…</span>';
+        fetch(url, { method: 'POST', credentials: 'same-origin' })
             .then(function(r) { return r.json(); })
             .then(function(data) {
-                if (data.ok) {
-                    result.textContent = 'OK';
-                    result.style.color = '#2e7d32';
-                } else {
-                    result.textContent = data.error || 'Failed';
-                    result.style.color = '#c62828';
+                var html = '';
+                if (data.checks && data.checks.length) {
+                    html += '<table style="border-collapse:collapse;font-size:0.85rem;margin-top:0.25rem">';
+                    data.checks.forEach(function(c) {
+                        var icon = c.ok ? (c.fixed ? '\u2714\ufe0f' : '\u2714') : '\u2718';
+                        var color = c.ok ? '#2e7d32' : '#c62828';
+                        var fixedTag = c.fixed ? ' <span style="color:#e65100;font-weight:600">[fixed]</span>' : '';
+                        html += '<tr><td style="padding:2px 8px 2px 0;color:' + color + '">' + icon + '</td>';
+                        html += '<td style="padding:2px 8px 2px 0;font-weight:600">' + c.name + '</td>';
+                        html += '<td style="padding:2px 0;color:#555">' + c.detail + fixedTag + '</td></tr>';
+                    });
+                    html += '</table>';
                 }
+                if (!data.checks || !data.checks.length) {
+                    html = '<span style="color:' + (data.ok ? '#2e7d32' : '#c62828') + '">' + (data.ok ? 'OK' : (data.error || 'Failed')) + '</span>';
+                }
+                result.innerHTML = html;
             })
             .catch(function(e) {
-                result.textContent = 'Error: ' + e.message;
-                result.style.color = '#c62828';
+                result.innerHTML = '<span style="color:#c62828">Error: ' + e.message + '</span>';
+            })
+            .finally(function() { btn.disabled = false; });
+    });
+    document.getElementById('test-jellyfin-btn').addEventListener('click', function() {
+        var btn = this;
+        var result = document.getElementById('test-jellyfin-result');
+        var url = '/settings/test-jellyfin';
+        btn.disabled = true;
+        result.innerHTML = '<span style="color:#666">Testing…</span>';
+        fetch(url, { method: 'POST', credentials: 'same-origin' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var html = '';
+                if (data.checks && data.checks.length) {
+                    html += '<table style="border-collapse:collapse;font-size:0.85rem;margin-top:0.25rem">';
+                    data.checks.forEach(function(c) {
+                        var icon = c.ok ? '\u2714' : '\u2718';
+                        var color = c.ok ? '#2e7d32' : '#c62828';
+                        html += '<tr><td style="padding:2px 8px 2px 0;color:' + color + '">' + icon + '</td>';
+                        html += '<td style="padding:2px 8px 2px 0;font-weight:600">' + c.name + '</td>';
+                        html += '<td style="padding:2px 0;color:#555">' + c.detail + '</td></tr>';
+                    });
+                    html += '</table>';
+                }
+                if (!data.checks || !data.checks.length) {
+                    html = '<span style="color:' + (data.ok ? '#2e7d32' : '#c62828') + '">' + (data.ok ? 'OK' : (data.error || 'Failed')) + '</span>';
+                }
+                result.innerHTML = html;
+            })
+            .catch(function(e) {
+                result.innerHTML = '<span style="color:#c62828">Error: ' + e.message + '</span>';
             })
             .finally(function() { btn.disabled = false; });
     });

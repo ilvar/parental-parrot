@@ -10,18 +10,25 @@ import (
 )
 
 type Config struct {
-	UIPassword         string   `yaml:"ui_password"`
-	DefaultRouterBlock bool     `yaml:"default_router_block"` // when true, new devices default to block_method=router + detect_method=router_conntrack
-	TrafficThreshold   int      `yaml:"traffic_threshold"`    // min conntrack entries to consider device "active" (default 1)
-	Router             *Router  `yaml:"router"`
-	Devices            []Device `yaml:"devices"`
+	UIPassword         string    `yaml:"ui_password"`
+	DefaultRouterBlock bool      `yaml:"default_router_block"` // when true, new devices default to block_method=router + detect_method=router_conntrack
+	TrafficThreshold   int       `yaml:"traffic_threshold"`    // min conntrack entries to consider device "active" (default 1)
+	Router             *Router   `yaml:"router"`
+	Jellyfin           *Jellyfin `yaml:"jellyfin"`
+	Devices            []Device  `yaml:"devices"`
 	// Schedule is an optional root schedule: when set, schedule.all (and weekday/weekend/per-day)
 	// define a shared daily limit across all devices (e.g. schedule.all: 120 = 2 hours total per day).
 	Schedule *Schedule `yaml:"schedule"`
 }
 
+type Jellyfin struct {
+	URL    string `yaml:"url"`
+	APIKey string `yaml:"api_key"`
+}
+
 type Router struct {
 	IP          string `yaml:"ip"`
+	SSHPort     string `yaml:"ssh_port"` // optional; defaults to "22"
 	SSHUser     string `yaml:"ssh_user"`
 	SSHPassword string `yaml:"ssh_password"`
 	SSHKey      string `yaml:"ssh_key"`
@@ -30,6 +37,7 @@ type Router struct {
 type Device struct {
 	Name         string   `yaml:"name"`
 	IP           string   `yaml:"ip"`
+	SSHPort      string   `yaml:"ssh_port"` // optional; defaults to "22"
 	SSHUser      string   `yaml:"ssh_user"`
 	SSHPassword  string   `yaml:"ssh_password"`
 	SSHKey       string   `yaml:"ssh_key"` // path to private key file
@@ -157,11 +165,14 @@ func LoadConfig(path string) (*Config, error) {
 		if d.DetectMethod == "" {
 			d.DetectMethod = "ping"
 		}
-		if d.DetectMethod != "ping" && d.DetectMethod != "router_conntrack" {
-			return nil, fmt.Errorf("device %q: unsupported detect_method %q (use ping or router_conntrack)", d.Name, d.DetectMethod)
+		if d.DetectMethod != "ping" && d.DetectMethod != "router_conntrack" && d.DetectMethod != "jellyfin" {
+			return nil, fmt.Errorf("device %q: unsupported detect_method %q (use ping, router_conntrack, or jellyfin)", d.Name, d.DetectMethod)
 		}
 		if d.DetectMethod == "router_conntrack" && cfg.Router == nil {
 			return nil, fmt.Errorf("device %q: [router] section must be configured when detect_method is \"router_conntrack\"", d.Name)
+		}
+		if d.DetectMethod == "jellyfin" && cfg.Jellyfin == nil {
+			return nil, fmt.Errorf("device %q: [jellyfin] section must be configured when detect_method is \"jellyfin\"", d.Name)
 		}
 
 		cfg.Devices[i] = d
